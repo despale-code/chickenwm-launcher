@@ -215,6 +215,7 @@ fn pixel_icon_for(kind: &LauncherItemKind) -> Option<PixelIcon> {
                 "chickenwm-files.exe" => Some(PixelIcon::Files),
                 "chickenwm-settings.exe" => Some(PixelIcon::Settings),
                 "chickenbrowser.exe" => Some(PixelIcon::Browser),
+                "chickenwm-shot.exe" => Some(PixelIcon::Snip),
                 _ => None,
             }
         }
@@ -273,13 +274,17 @@ fn index_all_applications() -> Vec<LauncherEntry> {
             }
         }
     }
+    // ChickenWM's own screenshot tool when installed, else Windows' Snipping Tool.
+    let shot = std::env::current_exe()
+        .ok()
+        .map(|e| e.with_file_name("chickenwm-shot.exe"))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from(SNIP_URI));
     entries.push(LauncherEntry {
-        title: "Snip Screenshot".to_string(),
-        subtitle: "Capture part of the screen (Super + Shift + S)".to_string(),
+        title: "Screenshot".to_string(),
+        subtitle: "Capture a region, a window or the screen (Print Screen or Super + Shift + S)".to_string(),
         badge: "SYS",
-        kind: LauncherItemKind::Application {
-            exec_path: PathBuf::from(SNIP_URI),
-        },
+        kind: LauncherItemKind::Application { exec_path: shot },
         score: 0,
     });
 
@@ -515,6 +520,8 @@ struct LauncherApp {
     indexed_apps: Arc<RwLock<Vec<LauncherEntry>>>,
     results: Vec<LauncherEntry>,
     css: Arc<RwLock<CssStyleSheet>>,
+    /// Keeps the UI font in step with `--font-family` in launcher.css.
+    font: chickenwm_core::fonts::EguiFont,
     summon_requested: Arc<AtomicBool>,
     visible: bool,
     anim_progress: f32, // 0.0 -> 1.0 fade
@@ -552,6 +559,7 @@ impl LauncherApp {
             indexed_apps,
             results: Vec::new(),
             css,
+            font: Default::default(),
             summon_requested,
             visible: start_visible,
             anim_progress: if start_visible { 0.0 } else { 1.0 },
@@ -848,6 +856,7 @@ impl eframe::App for LauncherApp {
         // ChickenWM launcher design: a floating card with a large search field, rich result
         // rows and a key-hint footer. Colors come from launcher.css (the system palette).
         let sheet = self.css.read().clone();
+        self.font.sync(ctx, &sheet, false);
         let t = self.anim_progress;
         let ease = 1.0 - (1.0 - t).powi(3);
         let col = |name: &str, r: u8, g: u8, b: u8, a: u8| {
