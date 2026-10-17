@@ -7,6 +7,10 @@
 //!        Shell Command (`> cargo build`), Window Switcher (`w `), System Commands (`lock`, `sleep`, `reboot`, `shutdown`, `reload`, `restore-explorer`)
 //! - 7.4: Live CSS Styling (`~/.config/chickenwm/launcher.css`)
 
+// Release builds are windowed apps: no console window when launched from the shell, a
+// hotkey or the launcher. Debug builds keep the console for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod icons;
 mod pixel_icons;
 
@@ -46,7 +50,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, HWND_TOPMOST, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOSIZE,
 };
 
-/// Visible result rows (rofi's default `lines: 15`).
+/// Maximum result rows kept in the list.
 const MAX_RESULTS: usize = 15;
 
 /// The launcher's top-level window (0 until eframe creates it).
@@ -162,6 +166,31 @@ struct LauncherEntry {
     badge: &'static str,
     kind: LauncherItemKind,
     score: u32,
+}
+
+/// No console window for helper processes (`shutdown.exe` is a console program).
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use std::os::windows::process::CommandExt;
+
+/// Opens an app, shortcut, document or URI the way Explorer does; `admin` = "Run as
+/// administrator" (`runas` verb, Windows shows the UAC prompt).
+fn shell_open(target: &std::path::Path, admin: bool) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let verb = HSTRING::from(if admin { "runas" } else { "open" });
+    let file = HSTRING::from(target.as_os_str());
+    let dir = target.parent().filter(|p| p.is_dir()).map(|p| HSTRING::from(p.as_os_str()));
+    unsafe {
+        ShellExecuteW(
+            None,
+            &verb,
+            &file,
+            windows::core::PCWSTR::null(),
+            dir.as_ref().map_or(windows::core::PCWSTR::null(), |d| windows::core::PCWSTR(d.as_ptr())),
+            SW_SHOWNORMAL,
+        );
+    }
 }
 
 /// URI opened by the Snip entry (and `SUPER SHIFT, S`).
@@ -665,22 +694,9 @@ impl LauncherApp {
 
         match entry.kind {
             LauncherItemKind::Application { exec_path, .. } => {
-                if run_as_admin {
-                    let _ = Command::new("powershell.exe")
-                        .args([
-                            "-NoProfile",
-                            "-Command",
-                            &format!(
-                                "Start-Process -FilePath '{}' -Verb RunAs",
-                                exec_path.display()
-                            ),
-                        ])
-                        .spawn();
-                } else {
-                    let _ = Command::new("cmd.exe")
-                        .args(["/C", "start", "", &exec_path.to_string_lossy()])
-                        .spawn();
-                }
+                // Straight through the shell (like a double-click): no console window flashes
+                // up, and shortcuts, .url files and URIs all just work.
+                shell_open(&exec_path, run_as_admin);
             }
             LauncherItemKind::Calculator { result, .. } => {
                 ctx.copy_text(result);
@@ -714,10 +730,10 @@ impl LauncherApp {
                         .spawn();
                 }
                 "reboot" => {
-                    let _ = Command::new("shutdown.exe").args(["/r", "/t", "0"]).spawn();
+                    let _ = Command::new("shutdown.exe").args(["/r", "/t", "0"]).creation_flags(CREATE_NO_WINDOW).spawn();
                 }
                 "shutdown" => {
-                    let _ = Command::new("shutdown.exe").args(["/s", "/t", "0"]).spawn();
+                    let _ = Command::new("shutdown.exe").args(["/s", "/t", "0"]).creation_flags(CREATE_NO_WINDOW).spawn();
                 }
                 _ => {}
             },
@@ -829,142 +845,179 @@ impl eframe::App for LauncherApp {
             return;
         }
 
-        // Rofi's built-in default theme (Solarized light). Overridable from launcher.css.
+        // ChickenWM launcher design: a floating card with a large search field, rich result
+        // rows and a key-hint footer. Colors come from launcher.css (the system palette).
         let sheet = self.css.read().clone();
-        let fade = self.anim_progress;
-        let color = |name: &str, r: u8, g: u8, b: u8| {
-            let c = sheet.var_color(name, chickenwm_core::config::RgbaColor { r, g, b, a: 255 });
-            egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, (c.a as f32 * fade) as u8)
+        let t = self.anim_progress;
+        let ease = 1.0 - (1.0 - t).powi(3);
+        let col = |name: &str, r: u8, g: u8, b: u8, a: u8| {
+            let c = sheet.var_color(name, chickenwm_core::config::RgbaColor { r, g, b, a });
+            egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, (c.a as f32 * ease) as u8)
         };
-        let background = color("--rofi-background", 0xFD, 0xF6, 0xE3);
-        let foreground = color("--rofi-foreground", 0x00, 0x2B, 0x36);
-        let lightbg = color("--rofi-lightbg", 0xEE, 0xE8, 0xD5);
-        let lightfg = color("--rofi-lightfg", 0x58, 0x68, 0x75);
-        // Selected row: the system accent (written by the theme engine); rofi's colors otherwise.
-        let selected_bg = if sheet.custom_properties.contains_key("--rofi-selected-bg") {
-            color("--rofi-selected-bg", 0, 0, 0)
-        } else {
-            lightfg
-        };
-        let selected_fg = if sheet.custom_properties.contains_key("--rofi-selected-fg") {
-            color("--rofi-selected-fg", 0, 0, 0)
-        } else {
-            lightbg
-        };
-        let icon_tint = egui::Color32::from_white_alpha((255.0 * fade) as u8);
-        let font = egui::FontId::monospace(15.0);
-        let row_h = 24.0;
-        let icon_px = row_h - 4.0;
-
-        let window_frame = egui::Frame::NONE
-            .fill(background)
-            .stroke(egui::Stroke::new(1.0_f32, foreground))
-            .corner_radius(egui::CornerRadius::ZERO)
-            .inner_margin(egui::Margin::same(5));
+        let card_bg = col("--surface-color", 251, 251, 251, 250);
+        let fg = col("--fg-color", 36, 35, 33, 255);
+        let sub = col("--subtext-color", 98, 95, 89, 255);
+        let accent = col("--accent-color", 36, 35, 33, 255);
+        let selected_bg = col("--selected-bg", 36, 35, 33, 34);
+        let border = col("--border-color", 36, 35, 33, 40);
+        let radius = sheet.var_px("--border-radius", 16.0).clamp(0.0, 32.0);
+        let row_h = sheet.var_px("--row-height", 48.0).clamp(32.0, 80.0);
+        let icon_px = sheet.var_px("--icon-size", 32.0).clamp(16.0, row_h - 8.0);
+        let font_size = sheet.var_px("--font-size", 15.0).clamp(11.0, 22.0);
+        let icon_tint = egui::Color32::from_white_alpha((255.0 * ease) as u8);
+        let title_font = egui::FontId::proportional(font_size);
+        let sub_font = egui::FontId::proportional(font_size - 2.5);
+        let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        const MARGIN: f32 = 16.0; // room for the card's shadow
+        const GAP: f32 = 2.0;
 
         let mut icon_requests = Vec::new();
         let mut clicked_idx = None;
-        egui::CentralPanel::default()
-            .frame(window_frame)
-            .show(ctx, |ui| {
-                // inputbar: "drun:" prompt + entry
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.label(egui::RichText::new("drun").font(font.clone()).color(foreground));
-                    ui.label(egui::RichText::new(":").font(font.clone()).color(foreground));
-                    ui.add_space(5.0);
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.query)
-                            .font(font.clone())
-                            .text_color(foreground)
-                            .frame(false)
-                            .lock_focus(true)
-                            .desired_width(f32::INFINITY),
-                    );
-                    resp.request_focus();
-                    if resp.changed() {
-                        self.recompute_results();
-                        self.scroll_to_selected = true;
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+            // Card settles in: slight rise while fading in.
+            let full = ui.max_rect().shrink(MARGIN);
+            let card = full.translate(egui::vec2(0.0, (1.0 - ease) * 10.0));
+            let painter = ui.painter();
+            let shadow = egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: egui::Color32::from_black_alpha((60.0 * ease) as u8) };
+            painter.add(shadow.as_shape(card, egui::CornerRadius::same(radius as u8)));
+            painter.rect(card, radius, card_bg, egui::Stroke::new(1.0_f32, border), egui::StrokeKind::Inside);
+
+            let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(card.shrink2(egui::vec2(14.0, 12.0))));
+            let ui = &mut inner;
+
+            // ── Search field ──
+            let (field, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 46.0), egui::Sense::hover());
+            let lens_c = egui::pos2(field.left() + 16.0, field.center().y - 1.0);
+            ui.painter().circle_stroke(lens_c, 7.0, egui::Stroke::new(2.0_f32, sub));
+            ui.painter().line_segment(
+                [lens_c + egui::vec2(5.0, 5.0), lens_c + egui::vec2(10.0, 10.0)],
+                egui::Stroke::new(2.4_f32, sub),
+            );
+            let edit_rect = egui::Rect::from_min_max(egui::pos2(field.left() + 36.0, field.top()), egui::pos2(field.right() - 90.0, field.bottom()));
+            let resp = ui.put(
+                edit_rect,
+                egui::TextEdit::singleline(&mut self.query)
+                    .font(egui::FontId::proportional(font_size + 6.0))
+                    .text_color(fg)
+                    .hint_text(egui::RichText::new("Search apps and windows · = math · > command").color(sub))
+                    .frame(false)
+                    .lock_focus(true)
+                    .vertical_align(egui::Align::Center),
+            );
+            resp.request_focus();
+            if resp.changed() {
+                self.recompute_results();
+                self.scroll_to_selected = true;
+            }
+            let count = self.results.len();
+            ui.painter().text(
+                egui::pos2(field.right() - 4.0, field.center().y),
+                egui::Align2::RIGHT_CENTER,
+                if count == 1 { "1 result".to_string() } else { format!("{count} results") },
+                sub_font.clone(),
+                sub,
+            );
+            ui.painter().hline(card.x_range().shrink(1.0), field.bottom() + 6.0, egui::Stroke::new(1.0_f32, border));
+            ui.add_space(12.0);
+
+            // ── Results ──
+            let footer_h = 26.0;
+            let list_h = (ui.available_height() - footer_h).max(row_h);
+            ui.spacing_mut().scroll.bar_width = 4.0;
+            ui.spacing_mut().item_spacing.y = GAP;
+            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                if self.results.is_empty() {
+                    ui.add_space(30.0);
+                    ui.vertical_centered(|ui| ui.label(egui::RichText::new("Nothing matches").color(sub).size(font_size)));
+                    return;
+                }
+                // Selection highlight glides to the selected row.
+                let top = ui.cursor().top();
+                let target = self.selected_idx as f32 * (row_h + GAP);
+                let y = ui.ctx().animate_value_with_time(egui::Id::new("launcher-sel"), target, 0.12);
+                let hl = egui::Rect::from_min_size(egui::pos2(ui.max_rect().left(), top + y), egui::vec2(ui.available_width(), row_h));
+                ui.painter().rect_filled(hl, 10.0, selected_bg);
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(hl.left_top() + egui::vec2(0.0, 12.0), egui::vec2(3.0, row_h - 24.0)),
+                    2.0,
+                    accent,
+                );
+
+                for (idx, item) in self.results.iter().enumerate() {
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
+                    let selected = idx == self.selected_idx;
+                    let painter = ui.painter_at(rect);
+                    if resp.hovered() && !selected {
+                        painter.rect_filled(rect, 10.0, selected_bg.gamma_multiply(0.45));
                     }
-                });
-
-                // listview border: 2px dashed separator above the list
-                ui.add_space(3.0);
-                let (sep, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 2.0), egui::Sense::hover());
-                ui.painter().extend(egui::Shape::dashed_line(
-                    &[sep.left_center(), sep.right_center()],
-                    egui::Stroke::new(2.0_f32, foreground),
-                    6.0,
-                    4.0,
-                ));
-                ui.add_space(2.0);
-
-                ui.spacing_mut().scroll.bar_width = 4.0;
-                ui.spacing_mut().item_spacing.y = 2.0;
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    for (idx, item) in self.results.iter().enumerate() {
-                        let (rect, resp) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), row_h),
-                            egui::Sense::click(),
-                        );
-                        let selected = idx == self.selected_idx;
-                        let (fill, text) = if selected {
-                            (selected_bg, selected_fg)
-                        } else if idx % 2 == 1 {
-                            (lightbg, foreground)
-                        } else {
-                            (background, foreground)
-                        };
-                        let painter = ui.painter_at(rect);
-                        painter.rect_filled(rect, 0.0, fill);
-
-                        let icon_rect = egui::Rect::from_min_size(
-                            rect.left_top() + egui::vec2(3.0, (row_h - icon_px) / 2.0),
-                            egui::vec2(icon_px, icon_px),
-                        );
-                        let full_uv =
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                        if let Some(tex) =
-                            pixel_icon_for(&item.kind).and_then(|i| self.pixel_textures.get(&i))
-                        {
-                            painter.image(tex.id(), icon_rect, full_uv, icon_tint);
-                        } else if let LauncherItemKind::Application { exec_path } = &item.kind {
-                            match self.icon_cache.get(exec_path) {
-                                Some(IconSlot::Ready(tex)) => {
-                                    painter.image(
-                                        tex.id(),
-                                        icon_rect,
-                                        egui::Rect::from_min_max(
-                                            egui::pos2(0.0, 0.0),
-                                            egui::pos2(1.0, 1.0),
-                                        ),
-                                        icon_tint,
-                                    );
-                                }
-                                Some(IconSlot::Pending | IconSlot::Missing) => {}
-                                None => icon_requests.push(exec_path.clone()),
+                    let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 14.0 + icon_px / 2.0, rect.center().y), egui::vec2(icon_px, icon_px));
+                    if let Some(tex) = pixel_icon_for(&item.kind).and_then(|i| self.pixel_textures.get(&i)) {
+                        painter.image(tex.id(), icon_rect, full_uv, icon_tint);
+                    } else if let LauncherItemKind::Application { exec_path } = &item.kind {
+                        match self.icon_cache.get(exec_path) {
+                            Some(IconSlot::Ready(tex)) => {
+                                painter.image(tex.id(), icon_rect, full_uv, icon_tint);
                             }
-                        }
-                        painter.text(
-                            egui::pos2(icon_rect.right() + 6.0, rect.center().y),
-                            egui::Align2::LEFT_CENTER,
-                            &item.title,
-                            font.clone(),
-                            text,
-                        );
-
-                        if selected && self.scroll_to_selected {
-                            resp.scroll_to_me(None);
-                        }
-                        let resp = resp.on_hover_text(&item.subtitle);
-                        if resp.clicked() {
-                            clicked_idx = Some(idx);
+                            Some(IconSlot::Pending | IconSlot::Missing) => {
+                                painter.rect_filled(icon_rect.shrink(3.0), 8.0, border);
+                            }
+                            None => icon_requests.push(exec_path.clone()),
                         }
                     }
-                });
+                    let text_x = icon_rect.right() + 12.0;
+                    let (kind_label, title_text, title_col, title_f) = match &item.kind {
+                        LauncherItemKind::Calculator { result, .. } => ("Calculator", format!("= {result}"), accent, egui::FontId::proportional(font_size + 4.0)),
+                        LauncherItemKind::Application { .. } => ("App", item.title.clone(), fg, title_font.clone()),
+                        LauncherItemKind::WindowSwitch { .. } => ("Window", item.title.clone(), fg, title_font.clone()),
+                        LauncherItemKind::ShellCommand { .. } => ("Command", item.title.clone(), fg, title_font.clone()),
+                        LauncherItemKind::SystemCommand { .. } => ("System", item.title.clone(), fg, title_font.clone()),
+                    };
+                    let right_w = 96.0;
+                    let text_clip = egui::Rect::from_min_max(egui::pos2(text_x, rect.top()), egui::pos2(rect.right() - right_w, rect.bottom()));
+                    let tp = painter.with_clip_rect(text_clip);
+                    let has_sub = !item.subtitle.is_empty();
+                    let title_y = if has_sub { rect.center().y - 9.0 } else { rect.center().y };
+                    tp.text(egui::pos2(text_x, title_y), egui::Align2::LEFT_CENTER, title_text, title_f, title_col);
+                    if has_sub {
+                        let subtitle = if matches!(item.kind, LauncherItemKind::Calculator { .. }) {
+                            "Enter to copy the result".to_string()
+                        } else {
+                            item.subtitle.clone()
+                        };
+                        tp.text(egui::pos2(text_x, rect.center().y + 10.0), egui::Align2::LEFT_CENTER, subtitle, sub_font.clone(), sub);
+                    }
+                    // Right side: kind label, or the action hint on the selected row.
+                    let hint = if selected { "↵ Open" } else { kind_label };
+                    let hint = if selected && matches!(item.kind, LauncherItemKind::Calculator { .. }) { "↵ Copy" } else { hint };
+                    painter.text(egui::pos2(rect.right() - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, hint, sub_font.clone(), if selected { fg } else { sub });
+
+                    if selected && self.scroll_to_selected {
+                        resp.scroll_to_me(None);
+                    }
+                    if resp.clicked() {
+                        clicked_idx = Some(idx);
+                    }
+                }
             });
-        self.scroll_to_selected = false;
+
+            // ── Footer: key hints ──
+            let (footer, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), footer_h), egui::Sense::hover());
+            ui.painter().hline(card.x_range().shrink(1.0), footer.top() + 2.0, egui::Stroke::new(1.0_f32, border));
+            ui.painter().text(
+                egui::pos2(footer.left() + 4.0, footer.center().y + 3.0),
+                egui::Align2::LEFT_CENTER,
+                "↑↓ navigate    ↵ open    Ctrl+Shift+↵ run as admin    Esc close",
+                egui::FontId::proportional(font_size - 3.5),
+                sub,
+            );
+            ui.painter().text(
+                egui::pos2(footer.right() - 4.0, footer.center().y + 3.0),
+                egui::Align2::RIGHT_CENTER,
+                "ChickenWM",
+                egui::FontId::proportional(font_size - 3.5),
+                sub.gamma_multiply(0.7),
+            );
+        });        self.scroll_to_selected = false;
 
         for path in icon_requests {
             self.icon_cache.insert(path.clone(), IconSlot::Pending);
@@ -1080,7 +1133,7 @@ fn main() -> Result<()> {
     let start_visible = !cli.daemon;
     let viewport = egui::ViewportBuilder::default()
         .with_title("ChickenWM Launcher")
-        .with_inner_size([640.0, 440.0])
+        .with_inner_size([700.0, 520.0])
         .with_decorations(false)
         .with_transparent(true)
         .with_always_on_top()
@@ -1089,7 +1142,7 @@ fn main() -> Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport,
-        // Open centered on the primary monitor, like rofi.
+        // Open centered on the primary monitor.
         centered: true,
         ..Default::default()
     };

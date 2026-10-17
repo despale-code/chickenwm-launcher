@@ -28,8 +28,90 @@ pub struct IconImage {
     pub rgba: Vec<u8>,
 }
 
-/// Extracts the shell's large icon for `path` (an `.exe`, `.lnk` or `.url`).
+/// Where a shortcut's icon really lives: its icon location, or else its target. Reading the
+/// `.lnk` itself would give Windows' version with the shortcut-arrow overlay.
+fn shortcut_icon_source(lnk: &Path) -> Option<(PathBuf, i32)> {
+    use windows::core::{Interface, HSTRING};
+    use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
+    use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        link.cast::<IPersistFile>().ok()?.Load(&HSTRING::from(lnk.as_os_str()), STGM_READ).ok()?;
+        let expand = |raw: &[u16]| -> Option<PathBuf> {
+            let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+            if len == 0 {
+                return None;
+            }
+            let s = String::from_utf16_lossy(&raw[..len]);
+            let mut out = [0u16; 1024];
+            let n = ExpandEnvironmentStringsW(&HSTRING::from(s.as_str()), Some(&mut out)) as usize;
+            let expanded = if n > 1 { String::from_utf16_lossy(&out[..n - 1]) } else { s };
+            let p = PathBuf::from(expanded);
+            p.exists().then_some(p)
+        };
+        let mut buf = [0u16; 1024];
+        let mut index = 0i32;
+        if link.GetIconLocation(&mut buf, &mut index).is_ok() {
+            if let Some(p) = expand(&buf) {
+                return Some((p, index));
+            }
+        }
+        let mut target = [0u16; 1024];
+        if link.GetPath(&mut target, std::ptr::null_mut(), 0).is_ok() {
+            if let Some(p) = expand(&target) {
+                return Some((p, 0));
+            }
+        }
+        None
+    }
+}
+
+/// A crisp 48 px icon straight from an icon resource (exe / dll / ico + index).
+fn extract_resource_icon(file: &Path, index: i32) -> Option<IconImage> {
+    use windows::Win32::UI::WindowsAndMessaging::PrivateExtractIconsW;
+    let mut wide = [0u16; 260];
+    let s: Vec<u16> = file.as_os_str().to_string_lossy().encode_utf16().collect();
+    if s.len() >= wide.len() {
+        return None;
+    }
+    wide[..s.len()].copy_from_slice(&s);
+    let mut icon = [HICON::default(); 1];
+    let got = unsafe { PrivateExtractIconsW(&wide, index, 48, 48, Some(&mut icon), None, 0) };
+    if got == 0 || got == u32::MAX || icon[0].is_invalid() {
+        return None;
+    }
+    unsafe {
+        let _guard = SafeHicon::new(icon[0]);
+        hicon_to_rgba(icon[0])
+    }
+}
+
+/// The app's icon for `path` (an `.exe`, `.lnk` or `.url`), without the shortcut arrow.
 pub fn extract_icon_rgba(path: &Path) -> Option<IconImage> {
+    let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+    if ext == "lnk" {
+        if let Some((source, index)) = shortcut_icon_source(path) {
+            let source_ext = source.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+            if matches!(source_ext.as_str(), "exe" | "dll" | "ico" | "cpl" | "icl") {
+                if let Some(img) = extract_resource_icon(&source, index) {
+                    return Some(img);
+                }
+            }
+            // Documents, folders, URLs: the target's own shell icon (no shortcut overlay).
+            if let Some(img) = shell_icon(&source) {
+                return Some(img);
+            }
+        }
+    } else if ext == "exe" {
+        if let Some(img) = extract_resource_icon(path, 0) {
+            return Some(img);
+        }
+    }
+    shell_icon(path)
+}
+
+fn shell_icon(path: &Path) -> Option<IconImage> {
     let wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()

@@ -19,5 +19,5 @@ parking_lot.workspace = true
 nucleo-matcher.workspace = true
 eframe.workspace = true
 egui.workspace = true
-windows.workspace = true
+windows = { workspace = true, features = ["Win32_System_Environment"] }
 raw-window-handle = "0.6"
