@@ -226,11 +226,12 @@ fn shell_open(target: &std::path::Path, admin: bool) {
 /// URI opened by the Snip entry (and `SUPER SHIFT, S`).
 const SNIP_URI: &str = "ms-screenclip:";
 
-/// ChickenWM's own apps, listed in drun with pixel-art icons: (title, subtitle, exe).
-const CHICKENWM_APPS: [(&str, &str, &str); 3] = [
+/// ChickenWM's core apps, listed in drun with pixel-art icons: (title, subtitle, exe). Optional
+/// ones (Hen Browser, ...) are listed only when installed, through the Start Menu shortcuts the
+/// installer creates.
+const CHICKENWM_APPS: [(&str, &str, &str); 2] = [
     ("ChickenWM Files", "ChickenWM file explorer (Super + E)", "chickenwm-files.exe"),
     ("ChickenWM Settings", "ChickenWM settings (Super + I)", "chickenwm-settings.exe"),
-    ("Hen Browser", "Web browser", "henbrowser.exe"),
 ];
 
 /// Built-in pixel-art icon for an entry; `None` means use the app's own icon.
@@ -242,6 +243,11 @@ fn pixel_icon_for(kind: &LauncherItemKind) -> Option<PixelIcon> {
             }
             let name = exec_path.file_name()?.to_str()?.to_ascii_lowercase();
             match name.as_str() {
+                // Start Menu shortcuts made by the ChickenWM installer.
+                "chickenwm files.lnk" => Some(PixelIcon::Files),
+                "chickenwm settings.lnk" => Some(PixelIcon::Settings),
+                "hen browser.lnk" => Some(PixelIcon::Browser),
+                "chickenwm screenshot.lnk" => Some(PixelIcon::Snip),
                 "chickenwm-files.exe" => Some(PixelIcon::Files),
                 "chickenwm-settings.exe" => Some(PixelIcon::Settings),
                 "henbrowser.exe" => Some(PixelIcon::Browser),
