@@ -582,6 +582,8 @@ struct LauncherApp {
     /// Set when the selection moves by keyboard so the list scrolls it into view.
     scroll_to_selected: bool,
     summoned_at: Option<Instant>,
+    /// The launcher has held the keyboard focus since it was summoned; losing it then closes it.
+    had_focus: bool,
     /// Recent clipboard text (memory only), for `c `.
     clip: quick::ClipHistory,
     /// ECB exchange rates for currency conversion.
@@ -624,6 +626,7 @@ impl LauncherApp {
             pixel_textures: HashMap::new(),
             scroll_to_selected: false,
             summoned_at: start_visible.then(Instant::now),
+            had_focus: false,
             clip: quick::spawn_clipboard_watch(),
             rates: quick::spawn_rates(),
             frecency: quick::Frecency::load(),
@@ -747,7 +750,7 @@ impl LauncherApp {
         // Web search shortcuts (`g …`, `yt …`, `gh …`, `ddg …`, `wiki …`, `maps …`).
         if let Some((site, url)) = quick::web_search(q) {
             self.results.push(LauncherEntry {
-                title: format!("Search {site} for “{}”", q.split_once(' ').map_or("", |x| x.1).trim()),
+                title: format!("Search {site} for '{}'", q.split_once(' ').map_or("", |x| x.1).trim()),
                 subtitle: url.clone(),
                 badge: "WEB",
                 kind: LauncherItemKind::Open { target: url, kind_label: "Web" },
@@ -781,7 +784,7 @@ impl LauncherApp {
             self.results.extend(list.into_iter().take(MAX_RESULTS - 1).map(|(_, _, e)| e.clone()));
             self.results.push(LauncherEntry {
                 title: "Prefix Cheat-Sheet  (type ? for full help)".to_string(),
-                subtitle: "w windows · c clipboard · r recent · kill proc · = math · > cmd · :emoji · g/yt/gh web".to_string(),
+                subtitle: "w windows \u{f444} c clipboard \u{f444} r recent \u{f444} kill proc \u{f444} = math \u{f444} > cmd \u{f444} :emoji \u{f444} g/yt/gh web".to_string(),
                 badge: "HELP",
                 kind: LauncherItemKind::CopyText {
                     text: "?".to_string(),
@@ -887,6 +890,28 @@ impl LauncherApp {
     }
 }
 
+/// Whether a mouse button is down with the pointer outside the launcher window.
+fn clicked_outside(ctx: &egui::Context) -> bool {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let down = [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON]
+        .iter()
+        .any(|k| unsafe { GetAsyncKeyState(i32::from(k.0)) } as u16 & 0x8000 != 0);
+    if !down {
+        return false;
+    }
+    let Some(rect) = ctx.input(|i| i.viewport().outer_rect) else {
+        return false;
+    };
+    let mut pt = POINT::default();
+    if unsafe { GetCursorPos(&mut pt) }.is_err() {
+        return false;
+    }
+    let ppp = ctx.pixels_per_point();
+    !rect.contains(egui::pos2(pt.x as f32 / ppp, pt.y as f32 / ppp))
+}
+
 impl eframe::App for LauncherApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
@@ -922,6 +947,7 @@ impl eframe::App for LauncherApp {
             self.visible = true;
             self.anim_progress = 0.0;
             self.summoned_at = Some(now);
+            self.had_focus = false;
             set_window_shown(true);
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
@@ -943,6 +969,21 @@ impl eframe::App for LauncherApp {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             ctx.request_repaint_after(Duration::from_millis(30));
+        }
+
+        // Clicking anywhere else closes the launcher: either it loses the focus it had, or (when
+        // it never won the focus race) a mouse click lands outside its window.
+        if os_focused {
+            self.had_focus = true;
+        } else if self.had_focus {
+            self.dismiss(ctx);
+            return;
+        } else if self.summoned_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(750)) {
+            if clicked_outside(ctx) {
+                self.dismiss(ctx);
+                return;
+            }
+            ctx.request_repaint_after(Duration::from_millis(60));
         }
 
         // Phase 7.1: Animate summon fade at active monitor's refresh rate
@@ -1062,7 +1103,7 @@ impl eframe::App for LauncherApp {
                 egui::TextEdit::singleline(&mut self.query)
                     .font(egui::FontId::proportional(font_size + 6.0))
                     .text_color(fg)
-                    .hint_text(egui::RichText::new("Search apps and windows · = math · > command").color(sub))
+                    .hint_text(egui::RichText::new("Search apps and windows \u{f444} = math \u{f444} > command").color(sub))
                     .frame(false)
                     .lock_focus(true)
                     .vertical_align(egui::Align::Center),
@@ -1146,15 +1187,15 @@ impl eframe::App for LauncherApp {
                     tp.text(egui::pos2(text_x, title_y), egui::Align2::LEFT_CENTER, title_text, title_f, title_col);
                     if has_sub {
                         let subtitle = match &item.kind {
-                            LauncherItemKind::Calculator { expression, .. } => format!("{expression}  ·  Enter to copy the result"),
+                            LauncherItemKind::Calculator { expression, .. } => format!("{expression}  \u{f444}  Enter to copy the result"),
                             _ => item.subtitle.clone(),
                         };
                         tp.text(egui::pos2(text_x, rect.center().y + 10.0), egui::Align2::LEFT_CENTER, subtitle, sub_font.clone(), sub);
                     }
                     // Right side: kind label, or the action hint on the selected row.
-                    let hint = if selected { "↵ Open" } else { kind_label };
-                    let hint = if selected && matches!(item.kind, LauncherItemKind::Calculator { .. } | LauncherItemKind::CopyText { .. }) { "↵ Copy" } else { hint };
-                    let hint = if selected && matches!(item.kind, LauncherItemKind::Kill { .. }) { "↵ Kill" } else { hint };
+                    let hint = if selected { "\u{f0311} Open" } else { kind_label };
+                    let hint = if selected && matches!(item.kind, LauncherItemKind::Calculator { .. } | LauncherItemKind::CopyText { .. }) { "\u{f0311} Copy" } else { hint };
+                    let hint = if selected && matches!(item.kind, LauncherItemKind::Kill { .. }) { "\u{f0311} Kill" } else { hint };
                     painter.text(egui::pos2(rect.right() - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, hint, sub_font.clone(), if selected { fg } else { sub });
 
                     if selected && self.scroll_to_selected {
@@ -1172,7 +1213,7 @@ impl eframe::App for LauncherApp {
             ui.painter().text(
                 egui::pos2(footer.left() + 4.0, footer.center().y + 3.0),
                 egui::Align2::LEFT_CENTER,
-                "↑↓ navigate    ↵ open    Ctrl+Shift+↵ run as admin    Esc close",
+                "\u{f07d} navigate    \u{f0311} open    Ctrl+Shift+\u{f0311} run as admin    Esc close",
                 egui::FontId::proportional(font_size - 3.5),
                 sub,
             );

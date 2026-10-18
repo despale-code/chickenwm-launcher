@@ -233,16 +233,16 @@ fn fallback_rates() -> Rates {
 /// Human-readable staleness indicator for cached currency rates.
 pub fn rates_staleness_label(rates: &Rates, current_ts: u64) -> String {
     if rates.fetched == 0 {
-        return format!("ECB {} · offline fallback", rates.date);
+        return format!("ECB {} \u{f444} offline fallback", rates.date);
     }
     let age_secs = current_ts.saturating_sub(rates.fetched);
     if age_secs < 3600 {
-        format!("ECB {} · updated {}m ago", rates.date, (age_secs / 60).max(1))
+        format!("ECB {} \u{f444} updated {}m ago", rates.date, (age_secs / 60).max(1))
     } else if age_secs < 86_400 {
-        format!("ECB {} · updated {}h ago", rates.date, age_secs / 3600)
+        format!("ECB {} \u{f444} updated {}h ago", rates.date, age_secs / 3600)
     } else {
         let days = age_secs / 86_400;
-        format!("ECB {} · stale ({days}d old, offline)", rates.date)
+        format!("ECB {} \u{f444} stale ({days}d old, offline)", rates.date)
     }
 }
 
@@ -640,7 +640,7 @@ pub fn spawn_clipboard_watch() -> ClipHistory {
 pub fn one_line(text: &str, max: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() > max {
-        flat.chars().take(max - 1).collect::<String>() + "…"
+        flat.chars().take(max - 1).collect::<String>() + "..."
     } else {
         flat
     }
@@ -681,8 +681,8 @@ pub fn handle_cheat_sheet_prefix(q: &str) -> Option<Vec<LauncherEntry>> {
             || desc.to_ascii_lowercase().contains(&filter)
         {
             out.push(LauncherEntry {
-                title: format!("{syntax}  —  {desc}"),
-                subtitle: format!("Prefix `{prefix}` • Press Enter to copy prefix"),
+                title: format!("{syntax}  \u{f444}  {desc}"),
+                subtitle: format!("Prefix `{prefix}` \u{f444} Press Enter to copy prefix"),
                 badge: "HELP",
                 kind: LauncherItemKind::CopyText {
                     text: prefix.to_string(),
@@ -715,7 +715,7 @@ pub fn handle_window_prefix(q: &str) -> Option<Vec<LauncherEntry>> {
             out.push(LauncherEntry {
                 title: c.title,
                 subtitle: format!(
-                    "Workspace {} • {} (0x{:X})",
+                    "Workspace {} \u{f444} {} (0x{:X})",
                     c.workspace_id, c.process_name, c.hwnd
                 ),
                 badge: "WIN",
@@ -747,11 +747,11 @@ pub fn handle_clipboard_prefix(
         .iter()
         .filter(|e| cq.is_empty() || e.text.to_lowercase().contains(&cq))
     {
-        let pin_tag = if entry.pinned { "📌 Pinned • " } else { "" };
+        let pin_tag = if entry.pinned { "\u{f0403} Pinned \u{f444} " } else { "" };
         out.push(LauncherEntry {
             title: one_line(&entry.text, 80),
             subtitle: format!(
-                "{pin_tag}{} characters • Enter to copy • Ctrl+P to {}",
+                "{pin_tag}{} characters \u{f444} Enter to copy \u{f444} Ctrl+P to {}",
                 entry.text.chars().count(),
                 if entry.pinned { "unpin" } else { "pin" }
             ),
