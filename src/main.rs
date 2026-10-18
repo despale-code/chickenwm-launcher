@@ -13,6 +13,7 @@
 
 mod icons;
 mod pixel_icons;
+mod quick;
 
 use anyhow::Result;
 use clap::Parser;
@@ -24,8 +25,8 @@ use chickenwm_core::init_tracing;
 use icons::IconLoader;
 use pixel_icons::PixelIcon;
 use chickenwm_core::ipc::{
-    send_ipc_command_blocking, serve_ipc, Action, ClientInfo, IpcCommand, IpcResponse,
-    PIPE_NAME_DAEMON, PIPE_NAME_LAUNCHER, PIPE_NAME_WM,
+    send_ipc_command_blocking, serve_ipc, Action, IpcCommand, IpcResponse, PIPE_NAME_DAEMON,
+    PIPE_NAME_LAUNCHER, PIPE_NAME_WM,
 };
 use chickenwm_core::monitor::{enumerate_monitors, max_native_refresh_rate};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -136,10 +137,25 @@ struct Cli {
     /// Start minimized in background daemon mode waiting for IPC summon (`$mainMod + D` or `Alt + Space`).
     #[arg(long)]
     daemon: bool,
+    /// Headless render (see `chickenwm_core::headless`): parsed there, accepted here.
+    #[arg(long, hide = true)]
+    render_to: Option<String>,
+    #[arg(long, hide = true)]
+    render_size: Option<String>,
+    #[arg(long, hide = true)]
+    render_scale: Option<String>,
+    #[arg(long, hide = true)]
+    render_frames: Option<String>,
+}
+
+/// Right-hand label for an open window: the workspace it lives on.
+fn workspace_label(ws: u32) -> &'static str {
+    const LABELS: [&str; 10] = ["WS 1", "WS 2", "WS 3", "WS 4", "WS 5", "WS 6", "WS 7", "WS 8", "WS 9", "WS 10"];
+    ws.checked_sub(1).and_then(|i| LABELS.get(i as usize)).copied().unwrap_or("Window")
 }
 
 #[derive(Debug, Clone)]
-enum LauncherItemKind {
+pub(crate) enum LauncherItemKind {
     Application {
         exec_path: PathBuf,
     },
@@ -157,15 +173,29 @@ enum LauncherItemKind {
     SystemCommand {
         cmd_id: &'static str,
     },
+    /// Enter copies `text` (conversion results, emoji, clipboard history).
+    CopyText {
+        text: String,
+        kind_label: &'static str,
+    },
+    /// A URL or file opened through the shell (web search, recent files).
+    Open {
+        target: String,
+        kind_label: &'static str,
+    },
+    /// `kill <name>`: ends these processes.
+    Kill {
+        pids: Vec<u32>,
+    },
 }
 
 #[derive(Debug, Clone)]
-struct LauncherEntry {
-    title: String,
-    subtitle: String,
-    badge: &'static str,
-    kind: LauncherItemKind,
-    score: u32,
+pub(crate) struct LauncherEntry {
+    pub(crate) title: String,
+    pub(crate) subtitle: String,
+    pub(crate) badge: &'static str,
+    pub(crate) kind: LauncherItemKind,
+    pub(crate) score: u32,
 }
 
 /// No console window for helper processes (`shutdown.exe` is a console program).
@@ -200,7 +230,7 @@ const SNIP_URI: &str = "ms-screenclip:";
 const CHICKENWM_APPS: [(&str, &str, &str); 3] = [
     ("ChickenWM Files", "ChickenWM file explorer (Super + E)", "chickenwm-files.exe"),
     ("ChickenWM Settings", "ChickenWM settings (Super + I)", "chickenwm-settings.exe"),
-    ("ChickenBrowser", "ChickenWM web browser", "chickenbrowser.exe"),
+    ("Hen Browser", "Web browser", "henbrowser.exe"),
 ];
 
 /// Built-in pixel-art icon for an entry; `None` means use the app's own icon.
@@ -214,7 +244,7 @@ fn pixel_icon_for(kind: &LauncherItemKind) -> Option<PixelIcon> {
             match name.as_str() {
                 "chickenwm-files.exe" => Some(PixelIcon::Files),
                 "chickenwm-settings.exe" => Some(PixelIcon::Settings),
-                "chickenbrowser.exe" => Some(PixelIcon::Browser),
+                "henbrowser.exe" => Some(PixelIcon::Browser),
                 "chickenwm-shot.exe" => Some(PixelIcon::Snip),
                 _ => None,
             }
@@ -222,6 +252,8 @@ fn pixel_icon_for(kind: &LauncherItemKind) -> Option<PixelIcon> {
         LauncherItemKind::Calculator { .. } => Some(PixelIcon::Calculator),
         LauncherItemKind::ShellCommand { .. } => Some(PixelIcon::Shell),
         LauncherItemKind::WindowSwitch { .. } => Some(PixelIcon::WindowSwitch),
+        LauncherItemKind::Kill { .. } => Some(PixelIcon::Shell),
+        LauncherItemKind::CopyText { .. } | LauncherItemKind::Open { .. } => None,
         LauncherItemKind::SystemCommand { cmd_id } => match *cmd_id {
             "reload" => Some(PixelIcon::Reload),
             "restore-explorer" => Some(PixelIcon::RestoreExplorer),
@@ -231,6 +263,15 @@ fn pixel_icon_for(kind: &LauncherItemKind) -> Option<PixelIcon> {
             "shutdown" => Some(PixelIcon::Shutdown),
             _ => None,
         },
+    }
+}
+
+/// What frecency is keyed on: the app path, or the system command id.
+fn frecency_key(kind: &LauncherItemKind) -> String {
+    match kind {
+        LauncherItemKind::Application { exec_path } => exec_path.to_string_lossy().to_lowercase(),
+        LauncherItemKind::SystemCommand { cmd_id } => format!("cmd:{cmd_id}"),
+        _ => String::new(),
     }
 }
 
@@ -535,6 +576,12 @@ struct LauncherApp {
     /// Set when the selection moves by keyboard so the list scrolls it into view.
     scroll_to_selected: bool,
     summoned_at: Option<Instant>,
+    /// Recent clipboard text (memory only), for `c `.
+    clip: quick::ClipHistory,
+    /// ECB exchange rates for currency conversion.
+    rates: quick::SharedRates,
+    /// Launch counts / recency, boosting what you open most.
+    frecency: quick::Frecency,
 }
 
 /// Per-application icon state; `Pending` stops the same path being queued every frame.
@@ -571,6 +618,9 @@ impl LauncherApp {
             pixel_textures: HashMap::new(),
             scroll_to_selected: false,
             summoned_at: start_visible.then(Instant::now),
+            clip: quick::spawn_clipboard_watch(),
+            rates: quick::spawn_rates(),
+            frecency: quick::Frecency::load(),
         };
         app.recompute_results();
         app
@@ -638,42 +688,101 @@ impl LauncherApp {
             return;
         }
 
+        // Prefix Cheat-Sheet (`?` or `? <filter>`)
+        if let Some(help_rows) = quick::handle_cheat_sheet_prefix(q) {
+            self.results = help_rows;
+            self.selected_idx = 0;
+            return;
+        }
+
         // Plugin 3: Window Switcher (`w <query>`)
-        if let Some(win_query) = q.strip_prefix("w ").or_else(|| if q == "w" { Some("") } else { None }) {
-            let wq = win_query.trim().to_ascii_lowercase();
-            let clients: Vec<ClientInfo> =
-                match send_ipc_command_blocking(PIPE_NAME_WM, &IpcCommand::QueryClients) {
-                    Ok(IpcResponse::Clients(c)) => c,
-                    _ => Vec::new(),
-                };
-            for c in clients {
-                if wq.is_empty()
-                    || c.title.to_ascii_lowercase().contains(&wq)
-                    || c.process_name.to_ascii_lowercase().contains(&wq)
-                {
-                    self.results.push(LauncherEntry {
-                        title: c.title,
-                        subtitle: format!(
-                            "Workspace {} • {} (0x{:X})",
-                            c.workspace_id, c.process_name, c.hwnd
-                        ),
-                        badge: "WIN",
-                        kind: LauncherItemKind::WindowSwitch {
-                            hwnd: c.hwnd,
-                            workspace_id: c.workspace_id,
-                        },
-                        score: 100,
-                    });
-                }
+        if let Some(win_rows) = quick::handle_window_prefix(q) {
+            self.results = win_rows;
+            self.selected_idx = 0;
+            return;
+        }
+
+        // Clipboard history (`c `, or `c` alone for everything).
+        if let Some(clip_rows) = quick::handle_clipboard_prefix(q, &self.clip, MAX_RESULTS) {
+            self.results = clip_rows;
+            self.selected_idx = 0;
+            return;
+        }
+
+        // Emoji (`:thumbs`).
+        if let Some(eq) = q.strip_prefix(':') {
+            for (emoji, keywords) in quick::emoji_search(eq, MAX_RESULTS * 2) {
+                self.results.push(LauncherEntry {
+                    title: format!("{emoji}  {}", keywords.split(' ').next().unwrap_or_default()),
+                    subtitle: keywords.to_owned(),
+                    badge: "EMOJI",
+                    kind: LauncherItemKind::CopyText { text: emoji.to_owned(), kind_label: "Emoji" },
+                    score: 0,
+                });
             }
             self.selected_idx = 0;
             return;
         }
 
+        // `kill <process>`
+        if let Some(kill_rows) = quick::handle_kill_prefix(q, MAX_RESULTS) {
+            self.results = kill_rows;
+            self.selected_idx = 0;
+            return;
+        }
+
+        // Recent files (`r `, or `r` alone).
+        if let Some(recent_rows) = quick::handle_recent_prefix(q, MAX_RESULTS) {
+            self.results = recent_rows;
+            self.selected_idx = 0;
+            return;
+        }
+
+        // Web search shortcuts (`g …`, `yt …`, `gh …`, `ddg …`, `wiki …`, `maps …`).
+        if let Some((site, url)) = quick::web_search(q) {
+            self.results.push(LauncherEntry {
+                title: format!("Search {site} for “{}”", q.split_once(' ').map_or("", |x| x.1).trim()),
+                subtitle: url.clone(),
+                badge: "WEB",
+                kind: LauncherItemKind::Open { target: url, kind_label: "Web" },
+                score: u32::MAX,
+            });
+            self.selected_idx = 0;
+            return;
+        }
+
+        // Conversions sit on top of the app matches (`10 km to mi`, `100 usd in eur`).
+        let conversion = quick::convert_units(q)
+            .map(|c| (c, "Convert"))
+            .or_else(|| self.rates.read().as_ref().and_then(|r| quick::convert_currency(q, r)).map(|c| (c, "Currency")));
+        if let Some(((result, detail), kind_label)) = conversion {
+            self.results.push(LauncherEntry {
+                title: format!("= {result}"),
+                subtitle: detail,
+                badge: "CONV",
+                kind: LauncherItemKind::CopyText { text: result.split(' ').next().unwrap_or_default().to_owned(), kind_label },
+                score: u32::MAX,
+            });
+        }
+
         // Plugin 4 & 5: Fuzzy App Runner & System Commands via `nucleo-matcher`
         let apps = self.indexed_apps.read();
         if q.is_empty() {
-            self.results.extend(apps.iter().take(MAX_RESULTS).cloned());
+            // Most used (and recently used) first, then the usual order, plus a `?` prefix cheat-sheet row.
+            let mut list: Vec<(usize, u32, &LauncherEntry)> =
+                apps.iter().enumerate().map(|(i, e)| (i, self.frecency.score(&frecency_key(&e.kind)), e)).collect();
+            list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            self.results.extend(list.into_iter().take(MAX_RESULTS - 1).map(|(_, _, e)| e.clone()));
+            self.results.push(LauncherEntry {
+                title: "Prefix Cheat-Sheet  (type ? for full help)".to_string(),
+                subtitle: "w windows · c clipboard · r recent · kill proc · = math · > cmd · :emoji · g/yt/gh web".to_string(),
+                badge: "HELP",
+                kind: LauncherItemKind::CopyText {
+                    text: "?".to_string(),
+                    kind_label: "Cheat-Sheet",
+                },
+                score: 0,
+            });
             self.selected_idx = 0;
             return;
         }
@@ -685,7 +794,8 @@ impl LauncherApp {
             let haystack = Utf32Str::new(&item.title, &mut char_buf);
             if let Some(score) = pat.score(haystack, &mut self.matcher) {
                 let mut matched = item.clone();
-                matched.score = score;
+                // Frecency nudges equal-ish matches toward what you actually open.
+                matched.score = score + self.frecency.score(&frecency_key(&item.kind)).min(400);
                 self.results.push(matched);
             }
         }
@@ -700,7 +810,20 @@ impl LauncherApp {
             return;
         };
 
+        if matches!(entry.kind, LauncherItemKind::Application { .. } | LauncherItemKind::SystemCommand { .. }) {
+            self.frecency.record(&frecency_key(&entry.kind));
+        }
         match entry.kind {
+            LauncherItemKind::CopyText { text, .. } => {
+                ctx.copy_text(text);
+            }
+            LauncherItemKind::Open { target, .. } => {
+                shell_open(Path::new(&target), false);
+            }
+            LauncherItemKind::Kill { pids } => {
+                let n = quick::kill(&pids);
+                info!("killed {n} of {} process(es)", pids.len());
+            }
             LauncherItemKind::Application { exec_path, .. } => {
                 // Straight through the shell (like a double-click): no console window flashes
                 // up, and shortcuts, .url files and URIs all just work.
@@ -826,6 +949,8 @@ impl eframe::App for LauncherApp {
         // never sees them (it would otherwise move its caret instead of the selection).
         let mut trigger_exec = None;
         let mut dismiss = false;
+        let mut forget_selected = false;
+        let mut toggle_pin_selected = false;
         let count = self.results.len();
         ctx.input_mut(|i| {
             let down = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
@@ -834,6 +959,10 @@ impl eframe::App for LauncherApp {
                 || i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
             if i.key_pressed(egui::Key::Escape) {
                 dismiss = true;
+            } else if i.consume_key(egui::Modifiers::CTRL, egui::Key::Delete) {
+                forget_selected = true;
+            } else if i.consume_key(egui::Modifiers::CTRL, egui::Key::P) {
+                toggle_pin_selected = true;
             } else if down && count > 0 {
                 self.selected_idx = (self.selected_idx + 1) % count;
                 self.scroll_to_selected = true;
@@ -847,6 +976,25 @@ impl eframe::App for LauncherApp {
         if dismiss {
             self.dismiss(ctx);
             return;
+        }
+        if forget_selected {
+            if let Some(entry) = self.results.get(self.selected_idx) {
+                let key = frecency_key(&entry.kind);
+                if !key.is_empty() && self.frecency.forget(&key) {
+                    self.recompute_results();
+                }
+            }
+        }
+        if toggle_pin_selected {
+            if let Some(entry) = self.results.get(self.selected_idx) {
+                if let LauncherItemKind::CopyText { text, kind_label } = &entry.kind {
+                    if *kind_label == "Clipboard" || *kind_label == "Pinned Clip" {
+                        let txt = text.clone();
+                        quick::toggle_pin_clipboard(&self.clip, &txt);
+                        self.recompute_results();
+                    }
+                }
+            }
         }
         if let Some(admin_flag) = trigger_exec {
             self.execute_selected(admin_flag, ctx);
@@ -977,9 +1125,12 @@ impl eframe::App for LauncherApp {
                     let (kind_label, title_text, title_col, title_f) = match &item.kind {
                         LauncherItemKind::Calculator { result, .. } => ("Calculator", format!("= {result}"), accent, egui::FontId::proportional(font_size + 4.0)),
                         LauncherItemKind::Application { .. } => ("App", item.title.clone(), fg, title_font.clone()),
-                        LauncherItemKind::WindowSwitch { .. } => ("Window", item.title.clone(), fg, title_font.clone()),
+                        LauncherItemKind::WindowSwitch { workspace_id, .. } => (workspace_label(*workspace_id), item.title.clone(), fg, title_font.clone()),
                         LauncherItemKind::ShellCommand { .. } => ("Command", item.title.clone(), fg, title_font.clone()),
                         LauncherItemKind::SystemCommand { .. } => ("System", item.title.clone(), fg, title_font.clone()),
+                        LauncherItemKind::CopyText { kind_label, .. } => (*kind_label, item.title.clone(), if item.badge == "CONV" { accent } else { fg }, title_font.clone()),
+                        LauncherItemKind::Open { kind_label, .. } => (*kind_label, item.title.clone(), fg, title_font.clone()),
+                        LauncherItemKind::Kill { .. } => ("Process", item.title.clone(), fg, title_font.clone()),
                     };
                     let right_w = 96.0;
                     let text_clip = egui::Rect::from_min_max(egui::pos2(text_x, rect.top()), egui::pos2(rect.right() - right_w, rect.bottom()));
@@ -988,16 +1139,16 @@ impl eframe::App for LauncherApp {
                     let title_y = if has_sub { rect.center().y - 9.0 } else { rect.center().y };
                     tp.text(egui::pos2(text_x, title_y), egui::Align2::LEFT_CENTER, title_text, title_f, title_col);
                     if has_sub {
-                        let subtitle = if matches!(item.kind, LauncherItemKind::Calculator { .. }) {
-                            "Enter to copy the result".to_string()
-                        } else {
-                            item.subtitle.clone()
+                        let subtitle = match &item.kind {
+                            LauncherItemKind::Calculator { expression, .. } => format!("{expression}  ·  Enter to copy the result"),
+                            _ => item.subtitle.clone(),
                         };
                         tp.text(egui::pos2(text_x, rect.center().y + 10.0), egui::Align2::LEFT_CENTER, subtitle, sub_font.clone(), sub);
                     }
                     // Right side: kind label, or the action hint on the selected row.
                     let hint = if selected { "↵ Open" } else { kind_label };
-                    let hint = if selected && matches!(item.kind, LauncherItemKind::Calculator { .. }) { "↵ Copy" } else { hint };
+                    let hint = if selected && matches!(item.kind, LauncherItemKind::Calculator { .. } | LauncherItemKind::CopyText { .. }) { "↵ Copy" } else { hint };
+                    let hint = if selected && matches!(item.kind, LauncherItemKind::Kill { .. }) { "↵ Kill" } else { hint };
                     painter.text(egui::pos2(rect.right() - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, hint, sub_font.clone(), if selected { fg } else { sub });
 
                     if selected && self.scroll_to_selected {
@@ -1043,10 +1194,12 @@ fn main() -> Result<()> {
     init_tracing("chickenwm_launcher");
     let _failsafe = spawn_emergency_failsafe_thread();
     let cli = Cli::parse();
+    // `--render-to out.png`: draw one frame headless, without the singleton or the IPC pipe.
+    let render = chickenwm_core::headless::RenderRequest::from_args([700.0, 520.0]);
 
     // Single instance: a second launcher would fight the first for the IPC pipe, splitting
     // summons between a visible and a stuck copy. Hand the summon to the running one and exit.
-    let _instance_guard = unsafe {
+    let _instance_guard = if render.is_some() { None } else { Some(unsafe {
         let name: Vec<u16> = "Local\\ChickenWMLauncherSingleton\0".encode_utf16().collect();
         let guard = CreateMutexW(None, true, PCWSTR(name.as_ptr()));
         if GetLastError() == ERROR_ALREADY_EXISTS {
@@ -1056,7 +1209,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         guard
-    };
+    }) };
 
     let (_doc, cfg) = bootstrap_config_and_themes()?;
     let monitors = enumerate_monitors();
@@ -1090,6 +1243,23 @@ fn main() -> Result<()> {
     });
 
     let summon_requested = Arc::new(AtomicBool::new(false));
+    if let Some(req) = render {
+        // Let the app index land so the list isn't empty in the capture.
+        let start = std::time::Instant::now();
+        while indexed_apps.read().is_empty() && start.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        return chickenwm_core::headless::render_app(&req, |cc| {
+            let mut app = LauncherApp::new(indexed_apps, css, summon_requested, true, target_fps, IconLoader::spawn(cc.egui_ctx.clone()));
+            // CHICKENWM_TEST_QUERY="10 km to mi": capture the results for that query.
+            if let Ok(q) = std::env::var("CHICKENWM_TEST_QUERY") {
+                std::thread::sleep(std::time::Duration::from_millis(800)); // clipboard / rates threads
+                app.query = q;
+                app.recompute_results();
+            }
+            app
+        });
+    }
     let summon_ipc = Arc::clone(&summon_requested);
     let css_ipc = Arc::clone(&css);
     // Shared slot for the egui `Context`, populated once the window is created. The IPC thread
@@ -1150,6 +1320,9 @@ fn main() -> Result<()> {
         .with_visible(start_visible);
 
     let native_options = eframe::NativeOptions {
+        // glow, not wgpu: egui_kittest (headless feature) also enables eframe's wgpu backend,
+        // which eframe would then prefer, and wgpu draws transparent windows black on Windows.
+        renderer: eframe::Renderer::Glow,
         viewport,
         // Open centered on the primary monitor.
         centered: true,

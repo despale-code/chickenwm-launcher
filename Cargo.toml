@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-chickenwm-core = { workspace = true, features = ["egui"] }
+chickenwm-core = { workspace = true, features = ["egui", "headless"] }
 image.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -19,5 +19,5 @@ parking_lot.workspace = true
 nucleo-matcher.workspace = true
 eframe.workspace = true
 egui.workspace = true
-windows = { workspace = true, features = ["Win32_System_Environment"] }
+windows = { workspace = true, features = ["Win32_System_Environment", "Win32_System_DataExchange"] }
 raw-window-handle = "0.6"
