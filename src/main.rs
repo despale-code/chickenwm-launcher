@@ -1358,6 +1358,7 @@ fn main() -> Result<()> {
 
     let start_visible = !cli.daemon;
     let viewport = egui::ViewportBuilder::default()
+            .with_icon(egui::IconData { rgba: include_bytes!("../assets/icon-64.rgba").to_vec(), width: 64, height: 64 })
         .with_title("ChickenWM Launcher")
         .with_inner_size([700.0, 520.0])
         .with_decorations(false)
