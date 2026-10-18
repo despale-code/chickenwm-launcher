@@ -241,19 +241,9 @@ fn pixel_icon_for(kind: &LauncherItemKind) -> Option<PixelIcon> {
             if exec_path.as_os_str() == SNIP_URI {
                 return Some(PixelIcon::Snip);
             }
-            let name = exec_path.file_name()?.to_str()?.to_ascii_lowercase();
-            match name.as_str() {
-                // Start Menu shortcuts made by the ChickenWM installer.
-                "chickenwm files.lnk" => Some(PixelIcon::Files),
-                "chickenwm settings.lnk" => Some(PixelIcon::Settings),
-                "hen browser.lnk" => Some(PixelIcon::Browser),
-                "chickenwm screenshot.lnk" => Some(PixelIcon::Snip),
-                "chickenwm-files.exe" => Some(PixelIcon::Files),
-                "chickenwm-settings.exe" => Some(PixelIcon::Settings),
-                "henbrowser.exe" => Some(PixelIcon::Browser),
-                "chickenwm-shot.exe" => Some(PixelIcon::Snip),
-                _ => None,
-            }
+            // Everything else, ChickenWM's own programs included, shows its real icon (the exes and
+            // their Start Menu shortcuts carry the ChickenWM artwork).
+            None
         }
         LauncherItemKind::Calculator { .. } => Some(PixelIcon::Calculator),
         LauncherItemKind::ShellCommand { .. } => Some(PixelIcon::Shell),
