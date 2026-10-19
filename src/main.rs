@@ -352,6 +352,7 @@ fn index_all_applications() -> Vec<LauncherEntry> {
     for root in scan_roots {
         scan_dir_recursive(&root, 0, &mut entries, &mut seen_names);
     }
+    index_uwp_apps(&mut entries, &mut seen_names);
 
     // 3. Scan PATH executables (limiting to fast top-level lookup)
     if let Ok(path_var) = std::env::var("PATH") {
@@ -420,6 +421,116 @@ fn scan_dir_recursive(
             }
         }
     }
+}
+
+fn index_uwp_apps(out: &mut Vec<LauncherEntry>, seen: &mut HashSet<String>) {
+    use windows::Win32::System::Com::*;
+    use windows::Win32::UI::Shell::*;
+    use windows::core::PCWSTR;
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let path: Vec<u16> = "shell:AppsFolder\0".encode_utf16().collect();
+        let Ok(folder): windows::core::Result<IShellItem> = SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None) else {
+            return;
+        };
+        let Ok(enum_items): windows::core::Result<IEnumShellItems> = folder.BindToHandler(None, &BHID_EnumItems) else {
+            return;
+        };
+        let mut item_arr: [Option<IShellItem>; 1] = [None];
+        let mut fetched = 0u32;
+        while enum_items.Next(&mut item_arr, Some(&mut fetched)).is_ok() && fetched == 1 {
+            if let Some(ref item) = item_arr[0] {
+                let name = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok().map(|p| {
+                    let s = p.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(p.as_ptr() as _));
+                    s
+                });
+                let aumid = item.GetDisplayName(SIGDN_PARENTRELATIVEPARSING).ok().map(|p| {
+                    let s = p.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(p.as_ptr() as _));
+                    s
+                });
+                if let (Some(name), Some(aumid)) = (name, aumid) {
+                    let lower = name.to_ascii_lowercase();
+                    if !name.is_empty() && !aumid.is_empty() && !lower.contains("uninstall") && seen.insert(lower) {
+                        out.push(LauncherEntry {
+                            title: name,
+                            subtitle: format!("shell:AppsFolder\\{aumid}"),
+                            badge: "APP",
+                            kind: LauncherItemKind::Application {
+                                exec_path: PathBuf::from(format!("shell:AppsFolder\\{aumid}")),
+                            },
+                            score: 0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn get_aliases(name: &str) -> &'static [&'static str] {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("windows terminal") || lower.contains("terminal") {
+        &["wt", "wt.exe", "term"]
+    } else if lower.contains("command prompt") {
+        &["cmd", "cmd.exe"]
+    } else if lower.contains("calculator") {
+        &["calc", "calc.exe"]
+    } else if lower.contains("powershell") {
+        &["ps", "pwsh", "powershell.exe"]
+    } else if lower.contains("visual studio code") || lower.contains("code") {
+        &["code", "vscode"]
+    } else if lower.contains("file explorer") || lower.contains("explorer") {
+        &["explorer", "files"]
+    } else if lower.contains("task manager") {
+        &["taskmgr"]
+    } else if lower.contains("registry editor") {
+        &["regedit"]
+    } else if lower.contains("control panel") {
+        &["control"]
+    } else if lower.contains("notepad") {
+        &["notepad", "text"]
+    } else {
+        &[]
+    }
+}
+
+fn spawn_apps_watcher(indexed: Arc<RwLock<Vec<LauncherEntry>>>) {
+    std::thread::spawn(move || {
+        use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+        let (tx, rx) = std::sync::mpsc::channel();
+        let Ok(mut watcher) = RecommendedWatcher::new(tx, Config::default()) else {
+            return;
+        };
+
+        let mut watch_paths = Vec::new();
+        if let Ok(prog_data) = std::env::var("ProgramData") {
+            watch_paths.push(PathBuf::from(prog_data).join("Microsoft\\Windows\\Start Menu\\Programs"));
+        }
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            watch_paths.push(PathBuf::from(app_data).join("Microsoft\\Windows\\Start Menu\\Programs"));
+        }
+        if let Some(desktop) = dirs::desktop_dir() {
+            watch_paths.push(desktop);
+        }
+
+        for p in watch_paths {
+            if p.exists() {
+                let _ = watcher.watch(&p, RecursiveMode::Recursive);
+            }
+        }
+
+        while let Ok(_event) = rx.recv() {
+            std::thread::sleep(Duration::from_millis(500));
+            while rx.try_recv().is_ok() {}
+
+            let refreshed = index_all_applications();
+            *indexed.write() = refreshed;
+            info!("launcher: background watcher refreshed application index");
+        }
+    });
 }
 
 /// Phase 7.3: Inline recursive-descent math expression evaluator (`= 144 * 1.5`, `+`, `-`, `*`, `/`, `^`, `(...)`).
@@ -787,14 +898,46 @@ impl LauncherApp {
         }
 
         let pat = Pattern::parse(q, CaseMatching::Ignore, Normalization::Smart);
+        let q_lower = q.to_ascii_lowercase();
         let mut char_buf = Vec::new();
+        let mut char_buf2 = Vec::new();
+
         for item in apps.iter() {
+            let mut best_score = None;
+
+            // 1. Score title
             char_buf.clear();
             let haystack = Utf32Str::new(&item.title, &mut char_buf);
-            if let Some(score) = pat.score(haystack, &mut self.matcher) {
+            if let Some(s) = pat.score(haystack, &mut self.matcher) {
+                best_score = Some(s);
+            }
+
+            // 2. Score subtitle / executable path
+            char_buf2.clear();
+            let sub_haystack = Utf32Str::new(&item.subtitle, &mut char_buf2);
+            if let Some(s) = pat.score(sub_haystack, &mut self.matcher) {
+                best_score = Some(best_score.map_or(s, |b| b.max(s)));
+            }
+
+            // 3. Score aliases
+            for &alias in get_aliases(&item.title) {
+                if alias == q_lower {
+                    best_score = Some(best_score.map_or(800, |b| b.max(800)));
+                } else if alias.starts_with(&q_lower) {
+                    best_score = Some(best_score.map_or(600, |b| b.max(600)));
+                }
+            }
+
+            // 4. Exact prefix boost (+500 if title starts with query)
+            if item.title.to_ascii_lowercase().starts_with(&q_lower) {
+                best_score = Some(best_score.unwrap_or(400) + 500);
+            }
+
+            if let Some(score) = best_score {
                 let mut matched = item.clone();
-                // Frecency nudges equal-ish matches toward what you actually open.
-                matched.score = score + self.frecency.score(&frecency_key(&item.kind)).min(400);
+                // Frecency clamped to 120 as a tie-breaker
+                let frec = self.frecency.score(&frecency_key(&item.kind)).min(120);
+                matched.score = score + frec;
                 self.results.push(matched);
             }
         }
@@ -985,6 +1128,7 @@ impl eframe::App for LauncherApp {
         // Keyboard navigation. Up/Down/Tab are consumed here so the always-focused search box
         // never sees them (it would otherwise move its caret instead of the selection).
         let mut trigger_exec = None;
+        let mut open_containing_folder = false;
         let mut dismiss = false;
         let mut forget_selected = false;
         let mut toggle_pin_selected = false;
@@ -1006,11 +1150,27 @@ impl eframe::App for LauncherApp {
             } else if up && count > 0 {
                 self.selected_idx = (self.selected_idx + count - 1) % count;
                 self.scroll_to_selected = true;
+            } else if i.modifiers.alt && i.key_pressed(egui::Key::Enter) {
+                open_containing_folder = true;
             } else if i.key_pressed(egui::Key::Enter) {
-                trigger_exec = Some(i.modifiers.ctrl && i.modifiers.shift);
+                trigger_exec = Some(i.modifiers.ctrl || (i.modifiers.ctrl && i.modifiers.shift));
             }
         });
         if dismiss {
+            self.dismiss(ctx);
+            return;
+        }
+        if open_containing_folder {
+            if let Some(entry) = self.results.get(self.selected_idx) {
+                if let LauncherItemKind::Application { exec_path, .. } = &entry.kind {
+                    let path_str = exec_path.to_string_lossy().to_string();
+                    if path_str.starts_with("shell:") {
+                        shell_open(exec_path, false);
+                    } else if let Some(parent) = exec_path.parent() {
+                        shell_open(parent, false);
+                    }
+                }
+            }
             self.dismiss(ctx);
             return;
         }
@@ -1278,6 +1438,7 @@ fn main() -> Result<()> {
         info!("Indexed {} applications and commands", items.len());
         *indexed_bg.write() = items;
     });
+    spawn_apps_watcher(Arc::clone(&indexed_apps));
 
     let summon_requested = Arc::new(AtomicBool::new(false));
     if let Some(req) = render {

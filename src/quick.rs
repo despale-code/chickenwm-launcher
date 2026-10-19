@@ -695,11 +695,9 @@ pub fn handle_cheat_sheet_prefix(q: &str) -> Option<Vec<LauncherEntry>> {
     Some(out)
 }
 
-/// Handler for `w <query>` (or `w`): queries `chickenwm-wm` for open windows and filters them.
+/// Handler for `w <query>`: queries `chickenwm-wm` for open windows and filters them.
 pub fn handle_window_prefix(q: &str) -> Option<Vec<LauncherEntry>> {
-    let win_query = q
-        .strip_prefix("w ")
-        .or_else(|| if q == "w" { Some("") } else { None })?;
+    let win_query = q.strip_prefix("w ")?;
     let wq = win_query.trim().to_ascii_lowercase();
     let clients: Vec<ClientInfo> =
         match send_ipc_command_blocking(PIPE_NAME_WM, &IpcCommand::QueryClients) {
@@ -730,17 +728,13 @@ pub fn handle_window_prefix(q: &str) -> Option<Vec<LauncherEntry>> {
     Some(out)
 }
 
-/// Handler for `c <query>` (or `c`): searches in-memory clipboard history, showing pinned items first.
+/// Handler for `c <query>`: searches in-memory clipboard history, showing pinned items first.
 pub fn handle_clipboard_prefix(
     q: &str,
     clip: &ClipHistory,
     max_results: usize,
 ) -> Option<Vec<LauncherEntry>> {
-    let cq = q
-        .strip_prefix("c ")
-        .or_else(|| (q == "c").then_some(""))?
-        .trim()
-        .to_lowercase();
+    let cq = q.strip_prefix("c ")?.trim().to_lowercase();
     let mut out = Vec::new();
     for entry in clip
         .read()
@@ -794,11 +788,9 @@ pub fn handle_kill_prefix(q: &str, max_results: usize) -> Option<Vec<LauncherEnt
     Some(out)
 }
 
-/// Handler for `r <query>` (or `r`): lists matching shortcuts from the Windows Recent folder.
+/// Handler for `r <query>`: lists matching shortcuts from the Windows Recent folder.
 pub fn handle_recent_prefix(q: &str, max_results: usize) -> Option<Vec<LauncherEntry>> {
-    let rq = q
-        .strip_prefix("r ")
-        .or_else(|| (q == "r").then_some(""))?;
+    let rq = q.strip_prefix("r ")?;
     let mut out = Vec::new();
     for (name, path) in recent_files(rq, max_results) {
         out.push(LauncherEntry {
@@ -819,7 +811,9 @@ pub fn handle_recent_prefix(q: &str, max_results: usize) -> Option<Vec<LauncherE
 // Frecency (smooth exponential half-life decay + "forget this entry" action, shared via chickenwm-core)
 // ---------------------------------------------------------------------------------------------
 
-pub use chickenwm_core::scoring::{FrecencyStore as Frecency, UseRecord as Use};
+pub use chickenwm_core::scoring::FrecencyStore as Frecency;
+#[allow(unused_imports)]
+pub use chickenwm_core::scoring::UseRecord as Use;
 
 #[cfg(test)]
 mod tests {
@@ -912,7 +906,7 @@ mod tests {
             },
         ]));
         assert!(toggle_pin_clipboard(&clip, "second"));
-        let rows = handle_clipboard_prefix("c", &clip, 10).unwrap();
+        let rows = handle_clipboard_prefix("c ", &clip, 10).unwrap();
         assert_eq!(rows[0].title, "second");
         assert_eq!(rows[0].badge, "PIN");
 
