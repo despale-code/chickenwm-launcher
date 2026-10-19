@@ -87,8 +87,44 @@ fn extract_resource_icon(file: &Path, index: i32) -> Option<IconImage> {
     }
 }
 
-/// The app's icon for `path` (an `.exe`, `.lnk` or `.url`), without the shortcut arrow.
+fn shell_item_image(path: &Path) -> Option<IconImage> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_RESIZETOFIT};
+
+    let path_str = path.to_string_lossy();
+    let wide = HSTRING::from(path_str.as_ref());
+    unsafe {
+        let factory: IShellItemImageFactory = SHCreateItemFromParsingName(&wide, None).ok()?;
+        let size = SIZE { cx: 48, cy: 48 };
+        let hbmp = factory.GetImage(size, SIIGBF_RESIZETOFIT).ok()?;
+        let rgba = read_bitmap_bgra(hbmp, 48, 48);
+        let _ = DeleteObject(hbmp);
+        let mut px = rgba?;
+        if px.chunks_exact(4).all(|p| p[3] == 0) {
+            for p in px.chunks_exact_mut(4) {
+                p[3] = 255;
+            }
+        }
+        for p in px.chunks_exact_mut(4) {
+            p.swap(0, 2); // BGRA -> RGBA
+        }
+        Some(IconImage {
+            width: 48,
+            height: 48,
+            rgba: px,
+        })
+    }
+}
+
+/// The app's icon for `path` (an `.exe`, `.lnk`, `shell:AppsFolder\...` or `.url`), without the shortcut arrow.
 pub fn extract_icon_rgba(path: &Path) -> Option<IconImage> {
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with("shell:") {
+        if let Some(img) = shell_item_image(path) {
+            return Some(img);
+        }
+    }
     let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
     if ext == "lnk" {
         if let Some((source, index)) = shortcut_icon_source(path) {
@@ -99,7 +135,7 @@ pub fn extract_icon_rgba(path: &Path) -> Option<IconImage> {
                 }
             }
             // Documents, folders, URLs: the target's own shell icon (no shortcut overlay).
-            if let Some(img) = shell_icon(&source) {
+            if let Some(img) = shell_icon(&source).or_else(|| shell_item_image(&source)) {
                 return Some(img);
             }
         }
@@ -108,7 +144,7 @@ pub fn extract_icon_rgba(path: &Path) -> Option<IconImage> {
             return Some(img);
         }
     }
-    shell_icon(path)
+    shell_icon(path).or_else(|| shell_item_image(path))
 }
 
 fn shell_icon(path: &Path) -> Option<IconImage> {
