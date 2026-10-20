@@ -1536,7 +1536,9 @@ fn main() -> Result<()> {
             let _ = egui_ctx_slot.set(cc.egui_ctx.clone());
             if let Ok(handle) = cc.window_handle() {
                 if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                    let hwnd = windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _);
                     LAUNCHER_HWND.store(win32.hwnd.get(), Ordering::SeqCst);
+                    chickenwm_core::sys::apply_acrylic(hwnd, None);
                 }
             }
             LAUNCHER_SHOWN.store(start_visible, Ordering::SeqCst);
