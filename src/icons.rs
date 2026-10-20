@@ -263,14 +263,14 @@ fn themed_icon(path: &Path, theme: &IconTheme) -> Option<IconImage> {
     }
     let stem = path.file_stem()?.to_string_lossy().to_ascii_lowercase();
     let dashed = stem.split_whitespace().collect::<Vec<_>>().join("-");
-    let png = [stem, dashed]
+    let icon_path = [stem, dashed]
         .into_iter()
         .find_map(|name| theme.resolve(&IconRequest::App(name)))?;
-    let img = image::open(png).ok()?.resize(64, 64, image::imageops::FilterType::Lanczos3).to_rgba8();
+    let (width, height, rgba) = chickenwm_core::icon_theme::load_icon_image(&icon_path, 64)?;
     Some(IconImage {
-        width: img.width() as usize,
-        height: img.height() as usize,
-        rgba: img.into_raw(),
+        width,
+        height,
+        rgba,
     })
 }
 
