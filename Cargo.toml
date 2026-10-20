@@ -1,13 +1,13 @@
 [package]
 name = "chickenwm-launcher"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 authors = ["ChickenWM Contributors"]
 license = "MIT"
 repository = "https://github.com/despale-code/chickenwm-launcher"
 
 [dependencies]
-chickenwm-core = { git = "https://github.com/despale-code/chickenwm-core", tag = "v0.1.2", features = ["egui", "headless"] }
+chickenwm-core = { git = "https://github.com/despale-code/chickenwm-core", tag = "v0.2.0", features = ["egui", "headless"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 tokio = { version = "1.43", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
