@@ -204,23 +204,11 @@ use std::os::windows::process::CommandExt;
 
 /// Opens an app, shortcut, document or URI the way Explorer does; `admin` = "Run as
 /// administrator" (`runas` verb, Windows shows the UAC prompt).
+/// When ChickenWM is running in Administrator mode, standard launches automatically de-elevate
+/// so child processes run as standard user (medium integrity) without inheriting admin rights.
 fn shell_open(target: &std::path::Path, admin: bool) {
-    use windows::core::HSTRING;
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let verb = HSTRING::from(if admin { "runas" } else { "open" });
-    let file = HSTRING::from(target.as_os_str());
-    let dir = target.parent().filter(|p| p.is_dir()).map(|p| HSTRING::from(p.as_os_str()));
-    unsafe {
-        ShellExecuteW(
-            None,
-            &verb,
-            &file,
-            windows::core::PCWSTR::null(),
-            dir.as_ref().map_or(windows::core::PCWSTR::null(), |d| windows::core::PCWSTR(d.as_ptr())),
-            SW_SHOWNORMAL,
-        );
-    }
+    let verb = if admin { Some("runas") } else { None };
+    chickenwm_core::elevation::shell_open_unelevated(target, None, verb);
 }
 
 /// URI opened by the Snip entry (and `SUPER SHIFT, S`).
