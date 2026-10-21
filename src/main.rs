@@ -214,10 +214,9 @@ fn shell_open(target: &std::path::Path, admin: bool) {
 /// URI opened by the Snip entry (and `SUPER SHIFT, S`).
 const SNIP_URI: &str = "ms-screenclip:";
 
-/// ChickenWM's core apps, listed in drun with pixel-art icons: (title, subtitle, exe). Optional
-/// ones (Hen Browser, ...) are listed only when installed, through the Start Menu shortcuts the
-/// installer creates.
-const CHICKENWM_APPS: [(&str, &str, &str); 2] = [
+/// ChickenWM's core apps, listed in drun: (title, subtitle, exe).
+const CHICKENWM_APPS: [(&str, &str, &str); 3] = [
+    ("Hen Browser", "ChickenWM fast minimalist browser", "henbrowser.exe"),
     ("ChickenWM Files", "ChickenWM file explorer (Super + E)", "chickenwm-files.exe"),
     ("ChickenWM Settings", "ChickenWM settings (Super + I)", "chickenwm-settings.exe"),
 ];
@@ -1196,13 +1195,18 @@ impl eframe::App for LauncherApp {
             let c = sheet.var_color(name, chickenwm_core::config::RgbaColor { r, g, b, a });
             egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, (c.a as f32 * ease) as u8)
         };
-        let card_bg = col("--surface-color", 251, 251, 251, 250);
+        // Card background: semi-transparent so the Win32 Acrylic backdrop shines through with rich blur
+        let card_bg = {
+            let c = sheet.var_color("--surface-color", chickenwm_core::config::RgbaColor { r: 32, g: 32, b: 36, a: 185 });
+            let alpha = if c.a >= 240 { 180 } else { c.a };
+            egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, (alpha as f32 * ease) as u8)
+        };
         let fg = col("--fg-color", 36, 35, 33, 255);
         let sub = col("--subtext-color", 98, 95, 89, 255);
         let accent = col("--accent-color", 36, 35, 33, 255);
         let selected_bg = col("--selected-bg", 36, 35, 33, 34);
         let border = col("--border-color", 36, 35, 33, 40);
-        let radius = sheet.var_px("--border-radius", 16.0).clamp(0.0, 32.0);
+        let radius = sheet.var_px("--border-radius", 14.0).clamp(0.0, 32.0);
         let row_h = sheet.var_px("--row-height", 48.0).clamp(32.0, 80.0);
         let icon_px = sheet.var_px("--icon-size", 32.0).clamp(16.0, row_h - 8.0);
         let font_size = sheet.var_px("--font-size", 15.0).clamp(11.0, 22.0);
@@ -1210,21 +1214,17 @@ impl eframe::App for LauncherApp {
         let title_font = egui::FontId::proportional(font_size);
         let sub_font = egui::FontId::proportional(font_size - 2.5);
         let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        const MARGIN: f32 = 16.0; // room for the card's shadow
         const GAP: f32 = 2.0;
 
         let mut icon_requests = Vec::new();
         let mut clicked_idx = None;
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
-            // Card settles in: slight rise while fading in.
-            let full = ui.max_rect().shrink(MARGIN);
-            let card = full.translate(egui::vec2(0.0, (1.0 - ease) * 10.0));
+            // Card spans the entire client area; DWM rounds the HWND edges natively
+            let card = ui.max_rect();
             let painter = ui.painter();
-            let shadow = egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: egui::Color32::from_black_alpha((60.0 * ease) as u8) };
-            painter.add(shadow.as_shape(card, egui::CornerRadius::same(radius as u8)));
             painter.rect(card, radius, card_bg, egui::Stroke::new(1.0_f32, border), egui::StrokeKind::Inside);
 
-            let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(card.shrink2(egui::vec2(14.0, 12.0))));
+            let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(card.shrink2(egui::vec2(16.0, 14.0))));
             let ui = &mut inner;
 
             // ── Search field ──
@@ -1380,12 +1380,13 @@ fn main() -> Result<()> {
     let _failsafe = spawn_emergency_failsafe_thread();
     let cli = Cli::parse();
     // `--render-to out.png`: draw one frame headless, without the singleton or the IPC pipe.
-    let render = chickenwm_core::headless::RenderRequest::from_args([700.0, 520.0]);
+    let render = chickenwm_core::headless::RenderRequest::from_args([680.0, 488.0]);
 
     // Single instance: a second launcher would fight the first for the IPC pipe, splitting
     // summons between a visible and a stuck copy. Hand the summon to the running one and exit.
     let _instance_guard = if render.is_some() { None } else { Some(unsafe {
         let name: Vec<u16> = "Local\\ChickenWMLauncherSingleton\0".encode_utf16().collect();
+        windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
         let guard = CreateMutexW(None, true, PCWSTR(name.as_ptr()));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             if !cli.daemon {
@@ -1499,7 +1500,7 @@ fn main() -> Result<()> {
     let viewport = egui::ViewportBuilder::default()
             .with_icon(egui::IconData { rgba: include_bytes!("../assets/icon-64.rgba").to_vec(), width: 64, height: 64 })
         .with_title("ChickenWM Launcher")
-        .with_inner_size([700.0, 520.0])
+        .with_inner_size([680.0, 488.0])
         .with_decorations(false)
         .with_transparent(true)
         .with_always_on_top()
@@ -1527,6 +1528,15 @@ fn main() -> Result<()> {
                     let hwnd = windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _);
                     LAUNCHER_HWND.store(win32.hwnd.get(), Ordering::SeqCst);
                     chickenwm_core::sys::apply_acrylic(hwnd, None);
+                    let corner = windows::Win32::Graphics::Dwm::DWMWCP_ROUND;
+                    let _ = unsafe {
+                        windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                            hwnd,
+                            windows::Win32::Graphics::Dwm::DWMWA_WINDOW_CORNER_PREFERENCE,
+                            &corner as *const _ as *const _,
+                            std::mem::size_of_val(&corner) as u32,
+                        )
+                    };
                 }
             }
             LAUNCHER_SHOWN.store(start_visible, Ordering::SeqCst);

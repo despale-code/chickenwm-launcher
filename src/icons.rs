@@ -28,16 +28,27 @@ pub struct IconImage {
     pub rgba: Vec<u8>,
 }
 
-/// Where a shortcut's icon really lives: its icon location, or else its target. Reading the
-/// `.lnk` itself would give Windows' version with the shortcut-arrow overlay.
-fn shortcut_icon_source(lnk: &Path) -> Option<(PathBuf, i32)> {
+/// Where a shortcut's icon really lives: its icon location and its target path.
+struct ShortcutInfo {
+    icon_source: Option<(PathBuf, i32)>,
+    target_path: Option<PathBuf>,
+}
+
+fn read_shortcut_info(lnk: &Path) -> ShortcutInfo {
     use windows::core::{Interface, HSTRING};
     use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
     use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
     unsafe {
-        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
-        link.cast::<IPersistFile>().ok()?.Load(&HSTRING::from(lnk.as_os_str()), STGM_READ).ok()?;
+        let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER) else {
+            return ShortcutInfo { icon_source: None, target_path: None };
+        };
+        let Ok(persist) = link.cast::<IPersistFile>() else {
+            return ShortcutInfo { icon_source: None, target_path: None };
+        };
+        if persist.Load(&HSTRING::from(lnk.as_os_str()), STGM_READ).is_err() {
+            return ShortcutInfo { icon_source: None, target_path: None };
+        }
         let expand = |raw: &[u16]| -> Option<PathBuf> {
             let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
             if len == 0 {
@@ -50,24 +61,26 @@ fn shortcut_icon_source(lnk: &Path) -> Option<(PathBuf, i32)> {
             let p = PathBuf::from(expanded);
             p.exists().then_some(p)
         };
+        let mut icon_source = None;
         let mut buf = [0u16; 1024];
         let mut index = 0i32;
         if link.GetIconLocation(&mut buf, &mut index).is_ok() {
             if let Some(p) = expand(&buf) {
-                return Some((p, index));
+                icon_source = Some((p, index));
             }
         }
+        let mut target_path = None;
         let mut target = [0u16; 1024];
         if link.GetPath(&mut target, std::ptr::null_mut(), 0).is_ok() {
             if let Some(p) = expand(&target) {
-                return Some((p, 0));
+                target_path = Some(p);
             }
         }
-        None
+        ShortcutInfo { icon_source, target_path }
     }
 }
 
-/// A crisp 48 px icon straight from an icon resource (exe / dll / ico + index).
+/// A crisp icon straight from an icon resource (exe / dll / ico / ProductIcon + index).
 fn extract_resource_icon(file: &Path, index: i32) -> Option<IconImage> {
     use windows::Win32::UI::WindowsAndMessaging::PrivateExtractIconsW;
     let mut wide = [0u16; 260];
@@ -77,7 +90,30 @@ fn extract_resource_icon(file: &Path, index: i32) -> Option<IconImage> {
     }
     wide[..s.len()].copy_from_slice(&s);
     let mut icon = [HICON::default(); 1];
-    let got = unsafe { PrivateExtractIconsW(&wide, index, 48, 48, Some(&mut icon), None, 0) };
+    let mut got = unsafe {
+        PrivateExtractIconsW(
+            &wide,
+            index,
+            48,
+            48,
+            Some(&mut icon),
+            None,
+            0,
+        )
+    };
+    if got == 0 || got == u32::MAX || icon[0].is_invalid() {
+        got = unsafe {
+            PrivateExtractIconsW(
+                &wide,
+                index,
+                32,
+                32,
+                Some(&mut icon),
+                None,
+                0,
+            )
+        };
+    }
     if got == 0 || got == u32::MAX || icon[0].is_invalid() {
         return None;
     }
@@ -127,24 +163,35 @@ pub fn extract_icon_rgba(path: &Path) -> Option<IconImage> {
     }
     let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
     if ext == "lnk" {
-        if let Some((source, index)) = shortcut_icon_source(path) {
-            let source_ext = source.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
-            if matches!(source_ext.as_str(), "exe" | "dll" | "ico" | "cpl" | "icl") {
-                if let Some(img) = extract_resource_icon(&source, index) {
-                    return Some(img);
-                }
+        let info = read_shortcut_info(path);
+        // 1. Try explicit icon location (ProductIcon, .ico, .exe, .dll, etc.)
+        if let Some((source, index)) = info.icon_source {
+            if let Some(img) = extract_resource_icon(&source, index) {
+                return Some(img);
             }
-            // Documents, folders, URLs: the target's own shell icon (no shortcut overlay).
-            if let Some(img) = shell_icon(&source).or_else(|| shell_item_image(&source)) {
+            if let Some(img) = shell_item_image(&source).or_else(|| shell_icon(&source)) {
                 return Some(img);
             }
         }
-    } else if ext == "exe" {
+        // 2. Fall back to target path if icon location failed or wasn't set
+        if let Some(target) = info.target_path {
+            if let Some(img) = extract_resource_icon(&target, 0) {
+                return Some(img);
+            }
+            if let Some(img) = shell_item_image(&target).or_else(|| shell_icon(&target)) {
+                return Some(img);
+            }
+        }
+        // 3. Fall back to the shortcut file's own shell icon
+        if let Some(img) = shell_item_image(path).or_else(|| shell_icon(path)) {
+            return Some(img);
+        }
+    } else if ext == "exe" || ext == "ico" || ext == "dll" {
         if let Some(img) = extract_resource_icon(path, 0) {
             return Some(img);
         }
     }
-    shell_icon(path).or_else(|| shell_item_image(path))
+    shell_item_image(path).or_else(|| shell_icon(path))
 }
 
 fn shell_icon(path: &Path) -> Option<IconImage> {
@@ -313,5 +360,29 @@ impl IconLoader {
 
     pub fn drain(&self) -> impl Iterator<Item = (PathBuf, Option<IconImage>)> + '_ {
         self.results.try_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_icon_from_msi_product_icon() {
+        // If Proton Authenticator is installed, verify its icon extracts successfully rather than falling back to blank document
+        let candidate = PathBuf::from(
+            std::env::var("APPDATA").unwrap_or_default(),
+        )
+        .join(r"Microsoft\Windows\Start Menu\Programs\Proton Authenticator\Proton Authenticator.lnk");
+        if candidate.exists() {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            }
+            let img = extract_icon_rgba(&candidate);
+            assert!(img.is_some(), "Expected icon extracted for Proton Authenticator");
+            let img = img.unwrap();
+            assert!(img.width > 0 && img.height > 0);
+            assert_eq!(img.rgba.len(), img.width * img.height * 4);
+        }
     }
 }
