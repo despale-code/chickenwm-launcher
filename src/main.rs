@@ -355,7 +355,7 @@ fn index_all_applications() -> Vec<LauncherEntry> {
                                 if seen_names.insert(key) {
                                     entries.push(LauncherEntry {
                                         title: stem.to_string(),
-                                        subtitle: path.to_string_lossy().into_owned(),
+                                        subtitle: String::new(),
                                         badge: "EXE",
                                         kind: LauncherItemKind::Application { exec_path: path },
                                         score: 0,
@@ -398,7 +398,7 @@ fn scan_dir_recursive(
                     if !lower.contains("uninstall") && seen.insert(lower) {
                         out.push(LauncherEntry {
                             title: stem.to_string(),
-                            subtitle: path.to_string_lossy().into_owned(),
+                            subtitle: String::new(),
                             badge: "APP",
                             kind: LauncherItemKind::Application { exec_path: path },
                             score: 0,
@@ -443,7 +443,7 @@ fn index_uwp_apps(out: &mut Vec<LauncherEntry>, seen: &mut HashSet<String>) {
                     if !name.is_empty() && !aumid.is_empty() && !lower.contains("uninstall") && seen.insert(lower) {
                         out.push(LauncherEntry {
                             title: name,
-                            subtitle: format!("shell:AppsFolder\\{aumid}"),
+                            subtitle: String::new(),
                             badge: "APP",
                             kind: LauncherItemKind::Application {
                                 exec_path: PathBuf::from(format!("shell:AppsFolder\\{aumid}")),
@@ -1265,9 +1265,13 @@ impl eframe::App for LauncherApp {
             // ── Results ──
             let footer_h = 26.0;
             let list_h = (ui.available_height() - footer_h).max(row_h);
-            ui.spacing_mut().scroll.bar_width = 4.0;
+            ui.spacing_mut().scroll.bar_width = 0.0;
             ui.spacing_mut().item_spacing.y = GAP;
-            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .max_height(list_h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                 if self.results.is_empty() {
                     ui.add_space(30.0);
                     ui.vertical_centered(|ui| ui.label(egui::RichText::new("Nothing matches").color(sub).size(font_size)));
@@ -1340,7 +1344,12 @@ impl eframe::App for LauncherApp {
                     let right_w = 96.0;
                     let text_clip = egui::Rect::from_min_max(egui::pos2(text_x, rect.top()), egui::pos2(rect.right() - right_w, rect.bottom()));
                     let tp = painter.with_clip_rect(text_clip);
-                    let has_sub = !item.subtitle.is_empty();
+                    let is_app = matches!(item.kind, LauncherItemKind::Application { .. });
+                    let is_path_sub = item.subtitle.starts_with("C:\\")
+                        || item.subtitle.starts_with("shell:")
+                        || item.subtitle.ends_with(".exe")
+                        || item.subtitle.ends_with(".lnk");
+                    let has_sub = !item.subtitle.is_empty() && (!is_app || (!is_path_sub && item.badge == "SYS"));
                     let title_y = if has_sub { rect.center().y - 9.0 } else { rect.center().y };
                     tp.text(egui::pos2(text_x, title_y), egui::Align2::LEFT_CENTER, title_text, title_f, title_col);
                     if has_sub {
