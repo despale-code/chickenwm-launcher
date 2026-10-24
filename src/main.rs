@@ -1547,8 +1547,10 @@ fn main() -> Result<()> {
                 if let RawWindowHandle::Win32(win32) = handle.as_raw() {
                     let hwnd = windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _);
                     LAUNCHER_HWND.store(win32.hwnd.get(), Ordering::SeqCst);
-                    chickenwm_core::sys::apply_acrylic(hwnd, None);
+                    chickenwm_core::sys::suppress_nc_paint(hwnd);
                     let no_round = windows::Win32::Graphics::Dwm::DWMWCP_DONOTROUND;
+                    let no_border: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
+                    let no_backdrop: u32 = 1; // DWMSBT_NONE
                     unsafe {
                         let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
                             hwnd,
@@ -1556,13 +1558,25 @@ fn main() -> Result<()> {
                             &no_round as *const _ as *const _,
                             std::mem::size_of_val(&no_round) as u32,
                         );
-                        let no_border: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
                         let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
                             hwnd,
                             windows::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR,
                             &no_border as *const _ as *const _,
                             std::mem::size_of_val(&no_border) as u32,
                         );
+                        let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                            hwnd,
+                            windows::Win32::Graphics::Dwm::DWMWA_SYSTEMBACKDROP_TYPE,
+                            &no_backdrop as *const _ as *const _,
+                            std::mem::size_of_val(&no_backdrop) as u32,
+                        );
+                        let margins = windows::Win32::UI::Controls::MARGINS {
+                            cxLeftWidth: -1,
+                            cxRightWidth: -1,
+                            cyTopHeight: -1,
+                            cyBottomHeight: -1,
+                        };
+                        let _ = windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea(hwnd, &margins);
                     };
                 }
             }
