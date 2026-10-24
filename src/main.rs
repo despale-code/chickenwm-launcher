@@ -215,9 +215,10 @@ fn shell_open(target: &std::path::Path, admin: bool) {
 const SNIP_URI: &str = "ms-screenclip:";
 
 /// ChickenWM's core apps, listed in drun: (title, subtitle, exe).
-const CHICKENWM_APPS: [(&str, &str, &str); 3] = [
+const CHICKENWM_APPS: [(&str, &str, &str); 4] = [
     ("Hen Browser", "ChickenWM fast minimalist browser", "henbrowser.exe"),
     ("ChickenWM Files", "ChickenWM file explorer (Super + E)", "chickenwm-files.exe"),
+    ("ChickenWM Downloader", "ChickenWM download manager & BitTorrent client", "chickenwm-downloader.exe"),
     ("ChickenWM Settings", "ChickenWM settings (Super + I)", "chickenwm-settings.exe"),
 ];
 
@@ -1039,7 +1040,8 @@ impl eframe::App for LauncherApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame_instant).as_secs_f32();
+        let raw_dt = now.duration_since(self.last_frame_instant).as_secs_f32();
+        let mut dt = raw_dt.min(1.0 / 30.0);
         self.last_frame_instant = now;
 
         self.absorb_loaded_icons(ctx);
@@ -1066,6 +1068,7 @@ impl eframe::App for LauncherApp {
             }
             self.visible = true;
             self.anim_progress = 0.0;
+            dt = 0.0;
             self.summoned_at = Some(now);
             self.had_focus = false;
             set_window_shown(true);
@@ -1108,7 +1111,7 @@ impl eframe::App for LauncherApp {
 
         // Phase 7.1: Animate summon fade at active monitor's refresh rate
         if self.anim_progress < 1.0 {
-            self.anim_progress = (self.anim_progress + dt * 8.5).min(1.0);
+            self.anim_progress = (self.anim_progress + dt * 5.2).min(1.0);
             ctx.request_repaint_after(Duration::from_secs_f64(1.0 / (self.target_fps as f64)));
         }
 
@@ -1220,7 +1223,10 @@ impl eframe::App for LauncherApp {
         let mut clicked_idx = None;
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
             // Card spans the entire client area; DWM rounds the HWND edges natively
-            let card = ui.max_rect();
+            let full_card = ui.max_rect();
+            let pop_scale = 0.92 + 0.08 * ease;
+            let slide_y = (1.0 - ease) * 16.0;
+            let card = egui::Rect::from_center_size(full_card.center() + egui::vec2(0.0, slide_y), full_card.size() * pop_scale);
             let painter = ui.painter();
             painter.rect(card, radius, card_bg, egui::Stroke::new(1.0_f32, border), egui::StrokeKind::Inside);
 
@@ -1290,7 +1296,10 @@ impl eframe::App for LauncherApp {
                 );
 
                 for (idx, item) in self.results.iter().enumerate() {
-                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
+                    let (raw_rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
+                    let row_t = ((t * 1.4) - (idx.min(8) as f32 * 0.045)).clamp(0.0, 1.0);
+                    let row_ease = 1.0 - (1.0 - row_t).powi(3);
+                    let rect = raw_rect.translate(egui::vec2(0.0, (1.0 - row_ease) * 10.0));
                     let selected = idx == self.selected_idx;
                     let painter = ui.painter_at(rect);
                     if resp.hovered() && !selected {
@@ -1467,6 +1476,7 @@ fn main() -> Result<()> {
         }
         return chickenwm_core::headless::render_app(&req, |cc| {
             let mut app = LauncherApp::new(indexed_apps, css, summon_requested, true, target_fps, IconLoader::spawn(cc.egui_ctx.clone()));
+            app.anim_progress = 1.0;
             // CHICKENWM_TEST_QUERY="10 km to mi": capture the results for that query.
             if let Ok(q) = std::env::var("CHICKENWM_TEST_QUERY") {
                 std::thread::sleep(std::time::Duration::from_millis(800)); // clipboard / rates threads
