@@ -1549,8 +1549,8 @@ fn main() -> Result<()> {
                     LAUNCHER_HWND.store(win32.hwnd.get(), Ordering::SeqCst);
                     chickenwm_core::sys::apply_acrylic(hwnd, None);
                     let no_round = windows::Win32::Graphics::Dwm::DWMWCP_DONOTROUND;
-                    let _ = unsafe {
-                        windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                    unsafe {
+                        let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
                             hwnd,
                             windows::Win32::Graphics::Dwm::DWMWA_WINDOW_CORNER_PREFERENCE,
                             &no_round as *const _ as *const _,
