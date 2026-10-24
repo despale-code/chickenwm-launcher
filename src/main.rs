@@ -872,7 +872,7 @@ impl LauncherApp {
             self.results.extend(list.into_iter().take(MAX_RESULTS - 1).map(|(_, _, e)| e.clone()));
             self.results.push(LauncherEntry {
                 title: "Prefix Cheat-Sheet  (type ? for full help)".to_string(),
-                subtitle: "w windows \u{f444} c clipboard \u{f444} r recent \u{f444} kill proc \u{f444} = math \u{f444} > cmd \u{f444} :emoji \u{f444} g/yt/gh web".to_string(),
+                subtitle: "w windows  •  c clipboard  •  r recent  •  kill proc  •  = math  •  > cmd  •  :emoji  •  g/yt/gh web".to_string(),
                 badge: "HELP",
                 kind: LauncherItemKind::CopyText {
                     text: "?".to_string(),
@@ -1351,9 +1351,9 @@ impl eframe::App for LauncherApp {
                         tp.text(egui::pos2(text_x, rect.center().y + 10.0), egui::Align2::LEFT_CENTER, subtitle, sub_font.clone(), sub);
                     }
                     // Right side: kind label, or the action hint on the selected row.
-                    let hint = if selected { "↵ Open" } else { kind_label };
-                    let hint = if selected && matches!(item.kind, LauncherItemKind::Calculator { .. } | LauncherItemKind::CopyText { .. }) { "↵ Copy" } else { hint };
-                    let hint = if selected && matches!(item.kind, LauncherItemKind::Kill { .. }) { "↵ Kill" } else { hint };
+                    let hint = if selected { "Open" } else { kind_label };
+                    let hint = if selected && matches!(item.kind, LauncherItemKind::Calculator { .. } | LauncherItemKind::CopyText { .. }) { "Copy" } else { hint };
+                    let hint = if selected && matches!(item.kind, LauncherItemKind::Kill { .. }) { "Kill" } else { hint };
                     painter.text(egui::pos2(rect.right() - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, hint, sub_font.clone(), if selected { fg } else { sub });
 
                     if selected && self.scroll_to_selected {
@@ -1371,7 +1371,7 @@ impl eframe::App for LauncherApp {
             ui.painter().text(
                 egui::pos2(footer.left() + 4.0, footer.center().y + 3.0),
                 egui::Align2::LEFT_CENTER,
-                "↑↓ navigate    ↵ open    Ctrl+Shift+↵ run as admin    Esc close",
+                "↑↓ navigate    Enter open    Ctrl+Shift+Enter run as admin    Esc close",
                 egui::FontId::proportional(font_size - 3.5),
                 sub,
             );
