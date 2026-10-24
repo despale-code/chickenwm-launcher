@@ -1241,7 +1241,7 @@ impl eframe::App for LauncherApp {
                 egui::TextEdit::singleline(&mut self.query)
                     .font(egui::FontId::proportional(font_size + 6.0))
                     .text_color(fg)
-                    .hint_text(egui::RichText::new("Search apps and windows \u{f444} = math \u{f444} > command").color(sub))
+                    .hint_text(egui::RichText::new("Search apps and windows  •  = math  •  > command").color(sub))
                     .frame(false)
                     .lock_focus(true)
                     .vertical_align(egui::Align::Center),
@@ -1301,9 +1301,29 @@ impl eframe::App for LauncherApp {
                                 painter.image(tex.id(), icon_rect, full_uv, icon_tint);
                             }
                             Some(IconSlot::Pending | IconSlot::Missing) => {
-                                painter.rect_filled(icon_rect.shrink(3.0), 8.0, border);
+                                painter.rect_filled(icon_rect, 8.0, selected_bg);
+                                chickenwm_core::ui_icons::paint_launcher(&painter, icon_rect, fg);
                             }
-                            None => icon_requests.push(exec_path.clone()),
+                            None => {
+                                painter.rect_filled(icon_rect, 8.0, selected_bg);
+                                chickenwm_core::ui_icons::paint_launcher(&painter, icon_rect, fg);
+                                icon_requests.push(exec_path.clone());
+                            }
+                        }
+                    } else {
+                        match &item.kind {
+                            LauncherItemKind::Open { .. } => {
+                                painter.rect_filled(icon_rect, 8.0, selected_bg);
+                                chickenwm_core::ui_icons::paint_folder(&painter, icon_rect, fg);
+                            }
+                            LauncherItemKind::CopyText { .. } => {
+                                painter.rect_filled(icon_rect, 8.0, selected_bg);
+                                chickenwm_core::ui_icons::paint_palette(&painter, icon_rect, fg);
+                            }
+                            _ => {
+                                painter.rect_filled(icon_rect, 8.0, selected_bg);
+                                chickenwm_core::ui_icons::paint_launcher(&painter, icon_rect, fg);
+                            }
                         }
                     }
                     let text_x = icon_rect.right() + 12.0;
@@ -1325,15 +1345,15 @@ impl eframe::App for LauncherApp {
                     tp.text(egui::pos2(text_x, title_y), egui::Align2::LEFT_CENTER, title_text, title_f, title_col);
                     if has_sub {
                         let subtitle = match &item.kind {
-                            LauncherItemKind::Calculator { expression, .. } => format!("{expression}  \u{f444}  Enter to copy the result"),
+                            LauncherItemKind::Calculator { expression, .. } => format!("{expression}  •  Enter to copy the result"),
                             _ => item.subtitle.clone(),
                         };
                         tp.text(egui::pos2(text_x, rect.center().y + 10.0), egui::Align2::LEFT_CENTER, subtitle, sub_font.clone(), sub);
                     }
                     // Right side: kind label, or the action hint on the selected row.
-                    let hint = if selected { "\u{f0311} Open" } else { kind_label };
-                    let hint = if selected && matches!(item.kind, LauncherItemKind::Calculator { .. } | LauncherItemKind::CopyText { .. }) { "\u{f0311} Copy" } else { hint };
-                    let hint = if selected && matches!(item.kind, LauncherItemKind::Kill { .. }) { "\u{f0311} Kill" } else { hint };
+                    let hint = if selected { "↵ Open" } else { kind_label };
+                    let hint = if selected && matches!(item.kind, LauncherItemKind::Calculator { .. } | LauncherItemKind::CopyText { .. }) { "↵ Copy" } else { hint };
+                    let hint = if selected && matches!(item.kind, LauncherItemKind::Kill { .. }) { "↵ Kill" } else { hint };
                     painter.text(egui::pos2(rect.right() - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, hint, sub_font.clone(), if selected { fg } else { sub });
 
                     if selected && self.scroll_to_selected {
@@ -1351,7 +1371,7 @@ impl eframe::App for LauncherApp {
             ui.painter().text(
                 egui::pos2(footer.left() + 4.0, footer.center().y + 3.0),
                 egui::Align2::LEFT_CENTER,
-                "\u{f07d} navigate    \u{f0311} open    Ctrl+Shift+\u{f0311} run as admin    Esc close",
+                "↑↓ navigate    ↵ open    Ctrl+Shift+↵ run as admin    Esc close",
                 egui::FontId::proportional(font_size - 3.5),
                 sub,
             );
@@ -1528,14 +1548,21 @@ fn main() -> Result<()> {
                     let hwnd = windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _);
                     LAUNCHER_HWND.store(win32.hwnd.get(), Ordering::SeqCst);
                     chickenwm_core::sys::apply_acrylic(hwnd, None);
-                    let corner = windows::Win32::Graphics::Dwm::DWMWCP_ROUND;
+                    let no_round = windows::Win32::Graphics::Dwm::DWMWCP_DONOTROUND;
                     let _ = unsafe {
                         windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
                             hwnd,
                             windows::Win32::Graphics::Dwm::DWMWA_WINDOW_CORNER_PREFERENCE,
-                            &corner as *const _ as *const _,
-                            std::mem::size_of_val(&corner) as u32,
-                        )
+                            &no_round as *const _ as *const _,
+                            std::mem::size_of_val(&no_round) as u32,
+                        );
+                        let no_border: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
+                        let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                            hwnd,
+                            windows::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR,
+                            &no_border as *const _ as *const _,
+                            std::mem::size_of_val(&no_border) as u32,
+                        );
                     };
                 }
             }
